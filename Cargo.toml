@@ -1,0 +1,13 @@
+[package]
+name = "atomic-sim"
+version = "0.1.0"
+authors = ["Nathan Dobson <nadobson@mac.com>"]
+edition = "2018"
+
+[dependencies]
+llvm-ir = { version = "0.7.2", features = ["llvm-10"] }
+either = "1.6.1"
+rand_xorshift = "0.2.0"
+rand = "0.7.3"
+
+
