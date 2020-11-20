@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::marker::PhantomData;
 use crate::value::Value;
 use llvm_ir::{Name, TypeRef};
-use crate::layout::Layout;
+use crate::layout::{Layout, align_to};
 use llvm_ir::instruction::Atomicity;
 use std::ops::Range;
 use crate::ctx::{Ctx, EvalCtx};
@@ -61,18 +61,17 @@ impl<'ctx> Memory<'ctx> {
         *freed = true;
     }
     pub fn alloc(&mut self, layout: Layout) -> Value {
-        let len = layout.size();
-        let align = layout.align();
-        self.next = (self.next.wrapping_sub(1) | (align - 1)).wrapping_add(1);
-        let result = self.next;
-        self.next = self.next + len + HEAP_GUARD;
+        let len = layout.bytes();
+        let align = layout.byte_align();
+        let result = align_to(self.next, align);
+        self.next = result + len + HEAP_GUARD;
         self.allocs.insert(result, Alloc { ptr: result, len, phantom: PhantomData, stores: vec![], freed: false });
         Value::from(result)
     }
     pub fn realloc(&mut self, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
         let new = self.alloc(new_layout);
-        assert_eq!(self.allocs[&old.as_u64()].len, old_layout.size());
-        self.memcpy(&new, old, new_layout.size().min(old_layout.size()));
+        assert_eq!(self.allocs[&old.as_u64()].len, old_layout.bytes());
+        self.memcpy(&new, old, new_layout.bytes().min(old_layout.bytes()));
         self.free(old);
 
         new
@@ -84,9 +83,9 @@ impl<'ctx> Memory<'ctx> {
         assert!(!alloc.freed);
         alloc
     }
-    pub fn store(&mut self, ptr: &Value, len: u64, value: &Value, _atomicity: Option<&'ctx Atomicity>) {
-        let value = self.ctx.to_bytes(&value).1;
-        assert_eq!(value.len() as u64, len);
+    pub fn store(&mut self, ptr: &Value, value: &Value, _atomicity: Option<&'ctx Atomicity>) {
+        let value = value.bytes();
+        let len = value.len() as u64;
         let alloc = self.find_alloc(ptr);
         let ptr = ptr.as_u64();
         assert!(alloc.ptr <= ptr && ptr + len <= alloc.ptr + alloc.len, "{:?} {:?} {:?}", alloc, ptr, len);
@@ -94,16 +93,16 @@ impl<'ctx> Memory<'ctx> {
             StoreLog {
                 pos: ptr,
                 len,
-                value,
+                value: value.to_vec(),
             }
         );
     }
     fn intersects(r1: Range<u64>, r2: Range<u64>) -> bool {
         r1.contains(&r2.start) || r2.contains(&r1.start)
     }
-    pub fn load(&mut self, ptr: &Value, len: u64, _atomicity: Option<&'ctx Atomicity>, ty: &TypeRef) -> Value {
-        let mut bytes = vec![0u8; len as usize];
-        let mut missing = (0..len).collect::<HashSet<_>>();
+    pub fn load(&mut self, ptr: &Value, layout: Layout, _atomicity: Option<&'ctx Atomicity>) -> Value {
+        let mut bytes = vec![0u8; layout.bytes() as usize];
+        let mut missing = (0..layout.bytes()).collect::<HashSet<_>>();
         let alloc = self.find_alloc(ptr);
         for store in alloc.stores.iter().rev() {
             let ptr = ptr.as_u64();
@@ -124,10 +123,11 @@ impl<'ctx> Memory<'ctx> {
             }
         }
         //assert!(missing.is_empty());
-        self.ctx.from_bytes(&bytes, ty)
+        Value::from_bytes(&bytes, layout)
     }
     pub fn add_symbol(&mut self, name: Symbol<'ctx>, layout: Layout) -> Value {
         let address = self.alloc(layout);
+        //println!("Add symbol {:?} {:?} {:?}", name, layout, address);
         assert!(self.symbols.insert(name.clone(), address.clone()).is_none());
         assert!(self.reverse.insert(address.clone(), name).is_none());
         address
@@ -146,10 +146,8 @@ impl<'ctx> Memory<'ctx> {
     }
     pub fn memcpy(&mut self, dst: &Value, src: &Value, len: u64) {
         if len > 0 {
-            let value = self.load(
-                &src, len, None,
-                &self.ctx.array_of(self.ctx.int(8), len as usize));
-            self.store(&dst, len, &value, None);
+            let value = self.load(&src, Layout::from_bytes(len, 1), None);
+            self.store(&dst, &value, None);
         }
     }
 }

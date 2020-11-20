@@ -4,7 +4,7 @@ use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type};
 use std::collections::HashMap;
 use llvm_ir::types::NamedStructDef;
 use crate::value::Value;
-use crate::layout::Layout;
+use crate::layout::{Layout, AggrLayout};
 use crate::memory::{Memory, Symbol};
 use crate::native::NativeFunction;
 
@@ -86,10 +86,10 @@ impl<'ctx> Ctx<'ctx> {
                 Value::aggregate(element_types.iter().map(|ty| self.aggregate_zero(ty)), *is_packed)
             }
             Type::IntegerType { bits } => {
-                Value::Int { bits: *bits as u64, value: 0 }
+                Value::new(*bits as u64, 0)
             }
             Type::PointerType { pointee_type, addr_space } => {
-                Value::Int { bits: self.ptr_bits, value: 0 }
+                Value::new(self.ptr_bits, 0)
             }
             _ => todo!("{:?}", ty)
         }
@@ -98,66 +98,62 @@ impl<'ctx> Ctx<'ctx> {
         assert_eq!(((bits + 7) / 8) as usize, bytes.len());
         let mut array = [0u8; 16];
         array[..bytes.len()].copy_from_slice(bytes);
-        Value::Int { bits, value: u128::from_le_bytes(array) }
+        Value::new(bits, u128::from_le_bytes(array))
     }
-    pub fn from_bytes(&self, bytes: &[u8], to_type: &TypeRef) -> Value {
-        match &**to_type {
-            Type::IntegerType { bits } => {
-                self.int_from_bytes(bytes, *bits as u64)
-            }
-            Type::PointerType { pointee_type, addr_space } => {
-                self.int_from_bytes(bytes, self.ptr_bits)
-            }
-            Type::ArrayType { element_type, num_elements } => {
-                let len = self.layout(element_type).size();
-                assert_eq!((len as usize) * *num_elements, bytes.len());
-                Value::aggregate(
-                    bytes
-                        .chunks(len as usize)
-                        .map(|b| self.from_bytes(b, element_type)),
-                    false)
-            }
-            Type::StructType { element_types, is_packed } => todo!(),
-            _ => todo!("{:?}", to_type),
-        }
-    }
-    pub fn to_bytes(&self, value: &Value) -> (Layout, Vec<u8>) {
-        match value {
-            Value::Int { bits, value } => {
-                (Layout::of_int(*bits), value.to_le_bytes()[0..(*bits as usize + 7) / 8].to_vec())
-            }
-            Value::Aggregate { children, is_packed } => {
-                let mut result = vec![];
-                let mut result_layout = Layout::from_size_align(0, 1);
-                for child in children.iter() {
-                    let (layout, value) = self.to_bytes(child);
-                    let offset = result_layout.offset(*is_packed, layout);
-                    result.resize(offset as usize, 0);
-                    result.extend_from_slice(&value);
-                    result_layout = result_layout.extend(*is_packed, layout);
-                }
-                (result_layout.pad_to_align(), result)
-            }
-        }
-    }
-    pub fn bitcast(&self, value: &Value, to_type: &TypeRef) -> Value {
-        let result = self.from_bytes(&self.to_bytes(value).1, to_type);
-        result
-    }
+    // pub fn from_bytes(&self, bytes: &[u8], to_type: &TypeRef) -> Value {
+    //     match &**to_type {
+    //         Type::IntegerType { bits } => {
+    //             self.int_from_bytes(bytes, *bits as u64)
+    //         }
+    //         Type::PointerType { pointee_type, addr_space } => {
+    //             self.int_from_bytes(bytes, self.ptr_bits)
+    //         }
+    //         Type::ArrayType { element_type, num_elements } => {
+    //             let len = self.layout(element_type).size();
+    //             assert_eq!((len as usize) * *num_elements, bytes.len());
+    //             Value::aggregate(
+    //                 bytes
+    //                     .chunks(len as usize)
+    //                     .map(|b| self.from_bytes(b, element_type)),
+    //                 false)
+    //         }
+    //         Type::StructType { element_types, is_packed } => todo!(),
+    //         _ => todo!("{:?}", to_type),
+    //     }
+    // }
+    // pub fn to_bytes(&self, value: &Value) -> (Layout, Vec<u8>) {
+    //     match value {
+    //         Value::Int { bits, value } => {
+    //             (Layout::of_int(*bits), value.to_le_bytes()[0..(*bits as usize + 7) / 8].to_vec())
+    //         }
+    //         Value::Aggregate { children, is_packed } => {
+    //             let mut result = vec![];
+    //             let mut result_layout = Layout::from_size_align(0, 1);
+    //             for child in children.iter() {
+    //                 let (layout, value) = self.to_bytes(child);
+    //                 let offset = result_layout.offset(*is_packed, layout);
+    //                 result.resize(offset as usize, 0);
+    //                 result.extend_from_slice(&value);
+    //                 result_layout = result_layout.extend(*is_packed, layout);
+    //             }
+    //             (result_layout.pad_to_align(), result)
+    //         }
+    //     }
+    // }
     pub fn layout_of_ptr(&self) -> Layout {
-        Layout::from_size_align(self.ptr_bits / 8, self.ptr_bits / 8)
+        Layout::from_bits(self.ptr_bits, self.ptr_bits)
     }
     pub fn layout(&self, typ: &TypeRef) -> Layout {
         match &**typ {
             Type::IntegerType { bits } => Layout::of_int(*bits as u64),
             Type::PointerType { .. } => self.layout_of_ptr(),
             Type::StructType { element_types, is_packed } => {
-                Layout::aggregate(*is_packed, element_types.iter().map(|t| self.layout(t)))
+                AggrLayout::new(*is_packed, element_types.iter().map(|t| self.layout(t))).layout()
             }
             Type::VectorType { element_type, num_elements }
             | Type::ArrayType { element_type, num_elements } => {
-                let layout = self.layout(&*element_type);
-                Layout::from_size_align(layout.size() * (*num_elements as u64), layout.align())
+                let layout = self.layout(&*element_type).pad_to_align();
+                Layout::from_bits(layout.bits() * (*num_elements as u64), layout.bit_align())
             }
             Type::NamedStructType { name } => {
                 self.layout(self.type_of_struct(name))

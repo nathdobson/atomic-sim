@@ -11,7 +11,7 @@ use std::fmt;
 use llvm_ir::{Instruction, Type, Operand, Constant, IntPredicate, Name, Terminator, constant, TypeRef};
 use llvm_ir::instruction::{Atomicity, InsertValue, SExt, ZExt, AtomicRMW, RMWBinOp, Select, Trunc, PtrToInt, ExtractValue, IntToPtr, CmpXchg};
 use std::ops::{Range, Deref};
-use crate::layout::{Layout, align_to};
+use crate::layout::{Layout, align_to, AggrLayout};
 use llvm_ir::types::NamedStructDef;
 use llvm_ir::constant::BitCast;
 use crate::memory::Symbol;
@@ -51,7 +51,7 @@ impl<'ctx> Process<'ctx> {
         process
     }
     fn initialize_globals(&mut self) {
-        let func_layout = Layout::from_size_align(256, 1);
+        let func_layout = Layout::from_bytes(256, 1);
         for (name, _) in self.ctx.native.iter() {
             self.memory.add_symbol(*name, func_layout);
         }
@@ -63,7 +63,7 @@ impl<'ctx> Process<'ctx> {
             for g in module.global_vars.iter() {
                 let symbol = Symbol::new(g.linkage, mi, str_of_name(&g.name));
                 let mut layout = self.ctx.layout(&self.target_of(&g.ty));
-                layout = Layout::from_size_align(layout.size(), layout.align().max(g.alignment as u64));
+                layout = Layout::from_bits(layout.bits(), layout.bit_align().max(8 * g.alignment as u64));
                 let loc = self.memory.add_symbol(symbol, layout);
                 inits.push((mi, symbol, layout, g, loc));
             }
@@ -73,10 +73,7 @@ impl<'ctx> Process<'ctx> {
                 self.get_constant(&EvalCtx { module: Some(mi) },
                                   g.initializer.as_ref().unwrap());
             assert_eq!(ty, self.target_of(&g.ty), "{} == {}", ty, g.ty);
-            self.memory.store(&loc,
-                              layout.size(),
-                              &value,
-                              None);
+            self.memory.store(&loc, &value, None);
         }
         for (mi, module) in self.ctx.modules.iter().enumerate() {
             for g in module.global_vars.iter() {
@@ -124,17 +121,15 @@ impl<'ctx> Process<'ctx> {
             }
             Node::Constant(c) => { next.set(self.get_constant(&next.ectx, c).1) }
             Node::Store(store) => {
-                let len = self.ctx.layout(&self.type_of(&next.ectx, &store.value)).size();
-                self.memory.store(&deps[0], len, deps[1], store.atomicity.as_ref());
+                self.memory.store(&deps[0], deps[1], store.atomicity.as_ref());
                 next.set(Value::new(0, 0));
             }
             Node::Load(load) => {
                 let ty = self.target_of(&self.type_of(&next.ectx, &load.address));
                 let layout = self.ctx.layout(&ty);
                 let value = self.memory.load(deps[0],
-                                             layout.size(),
-                                             load.atomicity.as_ref(),
-                                             &ty);
+                                             layout,
+                                             load.atomicity.as_ref());
                 next.set(value.clone());
             }
             Node::Phi(_phi) => todo!(),
@@ -156,15 +151,15 @@ impl<'ctx> Process<'ctx> {
                     Instruction::LShr(_) => next.set(deps[0] >> deps[1]),
                     Instruction::Shl(_) => next.set(deps[0] << deps[1]),
                     Instruction::SExt(SExt { to_type, .. }) =>
-                        next.set(deps[0].sext(self.ctx.layout(to_type).size() * 8)),
+                        next.set(deps[0].sext(self.ctx.layout(to_type).bits())),
                     Instruction::ZExt(ZExt { to_type, .. }) =>
-                        next.set(Value::new(self.ctx.layout(to_type).size() * 8, deps[0].as_u128())),
+                        next.set(Value::new(self.ctx.layout(to_type).bits(), deps[0].as_u128())),
                     Instruction::BitCast(bitcast) =>
-                        next.set(self.ctx.bitcast(deps[0], &bitcast.to_type)),
+                        next.set(deps[0].clone()),
                     Instruction::PtrToInt(PtrToInt { to_type, .. }) =>
-                        next.set(self.ctx.bitcast(deps[0], to_type)),
+                        next.set(deps[0].clone()),
                     Instruction::IntToPtr(IntToPtr { to_type, .. }) =>
-                        next.set(self.ctx.bitcast(deps[0], to_type)),
+                        next.set(deps[0].clone()),
 
                     Instruction::ICmp(icmp) => {
                         let (x, y) = (deps[0], deps[1]);
@@ -189,13 +184,13 @@ impl<'ctx> Process<'ctx> {
                         next.set(self.ctx.value_from_address(add_u64_i64(deps[0].as_u64(), offset)));
                     }
                     Instruction::InsertValue(InsertValue { aggregate, indices, .. }) => {
+                        let ty = self.type_of(&next.ectx, aggregate);
+                        let (_, offset) = self.offset_of(&ty, indices.iter().map(|i| *i as i64));
+                        let offset = offset as usize;
                         let mut aggregate = deps[0].clone();
                         let element = deps[1];
-                        let mut t = &mut aggregate;
-                        for i in indices {
-                            t = &mut aggregate[*i as u64];
-                        }
-                        *t = element.clone();
+                        let element = element.bytes();
+                        aggregate.bytes_mut()[offset..(offset + element.len())].copy_from_slice(element);
                         next.set(aggregate)
                     }
 
@@ -205,8 +200,8 @@ impl<'ctx> Process<'ctx> {
                                                operation, ..
                                            }) => {
                         let ty = self.target_of(&self.type_of(&next.ectx, address));
-                        let size = self.ctx.layout(&ty).size();
-                        let current = self.memory.load(deps[0], size, Some(atomicity), &ty).clone();
+                        let layout = self.ctx.layout(&ty);
+                        let current = self.memory.load(deps[0], layout, Some(atomicity)).clone();
                         let new = match operation {
                             RMWBinOp::Add => &current + deps[1],
                             RMWBinOp::Sub => &current - deps[1],
@@ -216,7 +211,7 @@ impl<'ctx> Process<'ctx> {
                             RMWBinOp::Xor => &current ^ deps[1],
                             _ => todo!("{:?}", operation),
                         };
-                        self.memory.store(deps[0], size, &new, Some(atomicity));
+                        self.memory.store(deps[0], &new, Some(atomicity));
                         next.set(current.clone());
                     }
                     Instruction::Select(Select { .. }) => {
@@ -234,21 +229,22 @@ impl<'ctx> Process<'ctx> {
                             _ => unreachable!("{:?}", to_type),
                         }
                     }
-                    Instruction::ExtractValue(ExtractValue { indices, .. }) => {
-                        let mut value = deps[0];
-                        for index in indices {
-                            value = &value[*index as u64];
-                        }
-                        next.set(value.clone());
+                    Instruction::ExtractValue(ExtractValue { aggregate, indices, dest, .. }) => {
+                        let ty = self.type_of(&next.ectx, aggregate);
+                        let (ty2, offset) = self.offset_of(&ty, indices.iter().map(|i| *i as i64));
+                        let layout = self.ctx.layout(&ty2);
+                        let offset = offset as usize;
+                        let bytes = &deps[0].bytes()[offset..offset + layout.bytes() as usize];
+                        next.set(Value::from_bytes(bytes, layout));
                     }
                     Instruction::CmpXchg(CmpXchg { address, volatile, atomicity, failure_memory_ordering, .. }) => {
                         let ty = self.target_of(&self.type_of(&next.ectx, address));
                         let layout = self.ctx.layout(&ty);
                         let (address, expected, replacement) = (deps[0], deps[1], deps[2]);
-                        let old = self.memory.load(address, layout.size(), Some(atomicity), &ty);
+                        let old = self.memory.load(address, layout, Some(atomicity));
                         let success = &old == expected;
                         if success {
-                            self.memory.store(address, layout.size(), replacement, Some(atomicity));
+                            self.memory.store(address, replacement, Some(atomicity));
                         }
                         next.set(Value::aggregate(vec![old.clone(), Value::from(success)].into_iter(), false))
                     }
@@ -287,6 +283,8 @@ impl<'ctx> Process<'ctx> {
         }
         if next.get().is_none() {
             panic!("Unfinished {:?}", next);
+        } else {
+            //println!("{:?}", next);
         }
         return true;
     }
@@ -307,15 +305,15 @@ impl<'ctx> Process<'ctx> {
             }
             Constant::BitCast(bitcast) => {
                 let (_, value) = self.get_constant(ectx, &*bitcast.operand);
-                (bitcast.to_type.clone(), self.ctx.bitcast(&value, &bitcast.to_type))
+                (bitcast.to_type.clone(), value)
             }
             Constant::IntToPtr(inttoptr) => {
                 let (_, value) = self.get_constant(ectx, &*inttoptr.operand);
-                (inttoptr.to_type.clone(), self.ctx.bitcast(&value, &inttoptr.to_type))
+                (inttoptr.to_type.clone(), value)
             }
             Constant::PtrToInt(ptrtoint) => {
                 let (_, value) = self.get_constant(ectx, &*ptrtoint.operand);
-                (ptrtoint.to_type.clone(), self.ctx.bitcast(&value, &ptrtoint.to_type))
+                (ptrtoint.to_type.clone(), value)
             }
             Constant::GlobalReference { name, ty } => {
                 let name = match name {
@@ -407,20 +405,19 @@ impl<'ctx> Process<'ctx> {
     fn field(&self, ty: &'ctx Type, index: i64) -> (TypeRef, i64) {
         match ty {
             Type::PointerType { pointee_type, .. } => {
-                (pointee_type.clone(), index * (self.ctx.layout(&*pointee_type).size() as i64))
+                (pointee_type.clone(), index * (self.ctx.layout(&*pointee_type).bytes() as i64))
             }
             Type::StructType { element_types, is_packed } => {
-                let mut offset =
-                    Layout::aggregate(
-                        *is_packed,
-                        element_types[..index as usize]
-                            .iter()
-                            .map(|t| self.ctx.layout(t)))
-                        .offset(*is_packed, self.ctx.layout(&element_types[index as usize]));
-                (element_types[index as usize].clone(), offset as i64)
+                let layout = AggrLayout::new(*is_packed,
+                                             element_types
+                                                   .iter()
+                                                   .map(|t| self.ctx.layout(t)));
+                let offset_bits = layout.bit_offset(index as usize);
+                assert!(offset_bits % 8 == 0);
+                (element_types[index as usize].clone(), (offset_bits / 8) as i64)
             }
             Type::ArrayType { element_type, num_elements } => {
-                (element_type.clone(), index * (self.ctx.layout(&element_type).size() as i64))
+                (element_type.clone(), index * (self.ctx.layout(&element_type).bytes() as i64))
             }
             Type::NamedStructType { name } => {
                 self.field(self.ctx.type_of_struct(name), index)

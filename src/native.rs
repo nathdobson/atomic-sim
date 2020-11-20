@@ -202,13 +202,12 @@ impl NativeFunction {
                     let (fd, buf, len) = (args[0], args[1], args[2].as_u64());
                     let value = if len > 0 {
                         memory.load(
-                            &buf, len, None,
-                            &ctx.array_of(ctx.int(8), len as usize))
+                            &buf, Layout::from_bytes(len, 1), None)
                     } else {
-                        Value::aggregate(vec![].into_iter(), false)
+                        Value::from(())
                     };
-                    let string =
-                        String::from_utf8((0..len).map(|i| value[i].unwrap_u8()).collect::<Vec<_>>());
+                    let value = value.bytes();
+                    let string = String::from_utf8(value.to_vec());
                     println!("write({:?}, {:?}, {:?}) -> {:?}", fd, buf, len, string);
                     ctx.value_from_address(len)
                 }),
@@ -265,7 +264,10 @@ impl NativeFunction {
                 name: "llvm.memset.p0i8.i64".to_string(),
                 imp: Box::new(|ctx, memory, args| {
                     let (addr, val, len) = (args[0], args[1], args[2].unwrap_u64());
-                    memory.store(addr, len, &Value::aggregate(repeat(val.clone()).take(len as usize), false), None);
+                    memory.store(addr,
+                                 &Value::from_bytes(&vec![val.unwrap_u8(); len as usize],
+                                                    Layout::from_bytes(len, 1)),
+                                 None);
                     Value::from(())
                 }),
             },
@@ -284,15 +286,15 @@ impl NativeFunction {
             NativeFunction {
                 name: "__rust_alloc".to_string(),
                 imp: Box::new(|ctx, memory, args| {
-                    memory.alloc(Layout::from_size_align(args[0].as_u64(), args[1].as_u64()))
+                    memory.alloc(Layout::from_bytes(args[0].as_u64(), args[1].as_u64()))
                 }),
             },
             NativeFunction {
                 name: "__rust_realloc".to_string(),
                 imp: Box::new(|ctx, memory, args| {
                     memory.realloc(args[0],
-                                   Layout::from_size_align(args[1].as_u64(), args[2].as_u64()),
-                                   Layout::from_size_align(args[3].as_u64(), args[2].as_u64()))
+                                   Layout::from_bytes(args[1].as_u64(), args[2].as_u64()),
+                                   Layout::from_bytes(args[3].as_u64(), args[2].as_u64()))
                 }),
             },
             NativeFunction {
@@ -307,7 +309,7 @@ impl NativeFunction {
                 imp: Box::new(|ctx, memory, args| {
                     for i in 0..args[2].as_u64() {
                         let ptr = ctx.value_from_address(args[0].as_u64() + i);
-                        let v = memory.load(&ptr, 1, None, &ctx.int(8));
+                        let v = memory.load(&ptr, Layout::from_bytes(1, 1), None);
                         if v.unwrap_u8() as u32 == args[1].unwrap_u32() {
                             return ptr;
                         }

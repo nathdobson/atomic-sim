@@ -293,7 +293,6 @@ impl<'ctx> Thread<'ctx> {
                             .zip(switch.dests.iter())
                             .find_map(|(pat, (_, target))| {
                                 let pat = pat.get().unwrap();
-                                assert!(pat.same_type(val));
                                 (pat == val).then_some(target)
                             })
                             .unwrap_or(&switch.default_dest);
@@ -339,6 +338,7 @@ impl<'ctx> Thread<'ctx> {
                     arguments.iter()
                         .map(|(arg, _)| { self.get_temp(arg) })
                         .collect::<Vec<_>>();
+                //println!("{:?}", deps);
                 let result = self.add_thunk(dest, Node::Native(native), deps.clone());
             } else if let Some(compiled) = self.ctx.functions.get(&fun) {
                 let temps =
