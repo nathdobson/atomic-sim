@@ -44,11 +44,7 @@ pub struct Frame<'ctx> {
 }
 
 pub enum Node<'ctx> {
-    Store(&'ctx Store),
-    Load(&'ctx Load),
-    Phi(&'ctx Phi),
-    Alloca(&'ctx Alloca),
-    Apply(&'ctx Instruction),
+    Instr(&'ctx Instruction),
     Constant(&'ctx Constant),
     Value(Value),
     Metadata,
@@ -136,7 +132,7 @@ impl<'ctx> Thread<'ctx> {
                     phi.incoming_values.iter()
                         .find(|(_, name)| Some(name) == self.top().origin).unwrap();
                 let deps = vec![self.get_temp(oper)];
-                self.add_thunk(Some(&phi.dest), Node::Phi(phi), deps);
+                self.add_thunk(Some(&phi.dest), Node::Instr(instr), deps);
             }
             Instruction::Call(call) => {
                 let frame = self.frames.len() - 1;
@@ -147,18 +143,18 @@ impl<'ctx> Thread<'ctx> {
                 return DecodeResult::Step;
             }
             Instruction::Alloca(alloca) => {
-                let thunk = self.add_thunk(Some(&alloca.dest), Node::Alloca(alloca), vec![]);
+                let thunk = self.add_thunk(Some(&alloca.dest), Node::Instr(instr), vec![]);
                 self.top_mut().allocs.push(thunk);
             }
             Instruction::Store(store) => {
                 let deps = vec![
                     self.get_temp(&store.address),
                     self.get_temp(&store.value)];
-                self.add_thunk(None, Node::Store(store), deps);
+                self.add_thunk(None, Node::Instr(instr), deps);
             }
             Instruction::Load(load) => {
                 let deps = vec![self.get_temp(&load.address)];
-                self.add_thunk(Some(&load.dest), Node::Load(load), deps);
+                self.add_thunk(Some(&load.dest), Node::Instr(instr), deps);
             }
             Instruction::Add(Add { dest, operand0, operand1, .. }) |
             Instruction::Sub(Sub { dest, operand0, operand1, .. }) |
@@ -176,7 +172,7 @@ impl<'ctx> Thread<'ctx> {
             Instruction::ICmp(ICmp { dest, operand0, operand1, .. })
             => {
                 let deps = vec![self.get_temp(operand0), self.get_temp(operand1)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::SExt(SExt { dest, operand, .. }) |
             Instruction::ZExt(ZExt { dest, operand, .. }) |
@@ -186,40 +182,40 @@ impl<'ctx> Thread<'ctx> {
             Instruction::BitCast(BitCast { dest, operand, .. })
             => {
                 let deps = vec![self.get_temp(operand)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::GetElementPtr(get_element_ptr) => {
                 let mut deps = vec![self.get_temp(&get_element_ptr.address)];
                 for ind in get_element_ptr.indices.iter() {
                     deps.push(self.get_temp(ind));
                 }
-                self.add_thunk(Some(&get_element_ptr.dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(&get_element_ptr.dest), Node::Instr(instr), deps);
             }
             Instruction::InsertValue(InsertValue { aggregate, element, dest, .. }) => {
                 let deps = vec![self.get_temp(aggregate), self.get_temp(element)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::AtomicRMW(AtomicRMW { address, value, dest, .. }) => {
                 let deps = vec![self.get_temp(address), self.get_temp(value)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::Select(Select { condition, true_value, false_value, dest, .. }) => {
                 let deps =
                     vec![self.get_temp(condition),
                          self.get_temp(true_value),
                          self.get_temp(false_value)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::ExtractValue(ExtractValue { aggregate, dest, .. }) => {
                 let deps = vec![self.get_temp(aggregate)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, .. }) => {
                 let deps =
                     vec![self.get_temp(address),
                          self.get_temp(expected),
                          self.get_temp(replacement)];
-                self.add_thunk(Some(dest), Node::Apply(instr), deps);
+                self.add_thunk(Some(dest), Node::Instr(instr), deps);
             }
             Instruction::Fence(Fence { atomicity, .. }) => {
                 //TODO
@@ -483,11 +479,7 @@ impl<'ctx> Debug for Thunk<'ctx> {
 impl<'ctx> Debug for Node<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Node::Store(store) => write!(f, "{}", store),
-            Node::Load(load) => write!(f, "{}", load),
-            Node::Phi(phi) => write!(f, "{}", phi),
-            Node::Alloca(alloca) => write!(f, "{}", alloca),
-            Node::Apply(apply) => write!(f, "{}", apply),
+            Node::Instr(apply) => write!(f, "{}", apply),
             Node::Constant(constant) => write!(f, "{}", constant),
             Node::Value(value) => write!(f, "Value{{{:?}}}", value),
             Node::Metadata => write!(f, "Metadata"),

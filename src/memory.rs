@@ -5,10 +5,11 @@ use llvm_ir::{Name, TypeRef};
 use crate::layout::{Layout, align_to};
 use llvm_ir::instruction::Atomicity;
 use std::ops::Range;
-use crate::ctx::{Ctx, EvalCtx};
+use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use llvm_ir::module::Linkage;
+use crate::exec::Process;
 
 #[derive(Debug)]
 pub struct Alloc<'ctx> {
@@ -67,14 +68,6 @@ impl<'ctx> Memory<'ctx> {
         self.next = result + len + HEAP_GUARD;
         self.allocs.insert(result, Alloc { ptr: result, len, phantom: PhantomData, stores: vec![], freed: false });
         Value::from(result)
-    }
-    pub fn realloc(&mut self, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
-        let new = self.alloc(new_layout);
-        assert_eq!(self.allocs[&old.as_u64()].len, old_layout.bytes());
-        self.memcpy(&new, old, new_layout.bytes().min(old_layout.bytes()));
-        self.free(old);
-
-        new
     }
     fn find_alloc<'a>(&'a mut self, ptr: &Value) -> &'a mut Alloc<'ctx> where 'ctx: 'a {
         let alloc = self.allocs.range_mut(..=ptr.as_u64())
@@ -135,7 +128,7 @@ impl<'ctx> Memory<'ctx> {
     pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
         self.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
     }
-    pub fn lookup(&self, ectx: &EvalCtx, name: &'ctx str) -> &Value {
+    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
         if let Some(internal) = self.symbols.get(&Symbol::Internal(ectx.module.unwrap(), name)) {
             internal
         } else if let Some(external) = self.symbols.get(&Symbol::External(name)) {
@@ -144,11 +137,8 @@ impl<'ctx> Memory<'ctx> {
             panic!("No symbol named {:?}", name)
         }
     }
-    pub fn memcpy(&mut self, dst: &Value, src: &Value, len: u64) {
-        if len > 0 {
-            let value = self.load(&src, Layout::from_bytes(len, 1), None);
-            self.store(&dst, &value, None);
-        }
+    pub fn ctx(&self) -> &'ctx Ctx<'ctx> {
+        self.ctx
     }
 }
 
@@ -167,6 +157,34 @@ impl<'ctx> Symbol<'ctx> {
             Linkage::Private | Linkage::Internal => Symbol::Internal(module, name),
             Linkage::External => Symbol::External(name),
             _ => todo!("{:?}", linkage)
+        }
+    }
+}
+
+impl<'ctx> Process<'ctx> {
+    pub fn free(&mut self, tctx: ThreadCtx, ptr: &Value) {
+        self.memory.free(ptr)
+    }
+    pub fn alloc(&mut self, tctx: ThreadCtx, layout: Layout) -> Value {
+        self.memory.alloc(layout)
+    }
+    pub fn realloc(&mut self, tctx: ThreadCtx, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
+        let new = self.alloc(tctx,new_layout);
+        self.memcpy(tctx,&new, old, new_layout.bytes().min(old_layout.bytes()));
+        self.free(tctx,old);
+
+        new
+    }
+    pub fn store(&mut self, tctx: ThreadCtx, ptr: &Value, value: &Value, atomicity: Option<&'ctx Atomicity>) {
+        self.memory.store(ptr, value, atomicity);
+    }
+    pub fn load(&mut self, tctx: ThreadCtx, ptr: &Value, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Value {
+        self.memory.load(ptr, layout, atomicity)
+    }
+    pub fn memcpy(&mut self, tctx: ThreadCtx, dst: &Value, src: &Value, len: u64) {
+        if len > 0 {
+            let value = self.load(tctx,&src, Layout::from_bytes(len, 1), None);
+            self.store(tctx,&dst, &value, None);
         }
     }
 }

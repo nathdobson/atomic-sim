@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 use std::fmt;
-use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type};
+use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type, Constant, constant};
 use std::collections::HashMap;
 use llvm_ir::types::NamedStructDef;
-use crate::value::Value;
+use crate::value::{Value, add_u64_i64};
 use crate::layout::{Layout, AggrLayout};
 use crate::memory::{Memory, Symbol};
 use crate::native::NativeFunction;
@@ -17,9 +17,15 @@ pub struct Ctx<'ctx> {
     pub page_size: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct EvalCtx {
     pub module: Option<usize>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ThreadCtx {
+    pub ectx: EvalCtx,
+    pub threadid: usize,
 }
 
 #[derive(Debug)]
@@ -190,4 +196,8 @@ impl<'ctx> Debug for Ctx<'ctx> {
             .field("functions", &self.functions)
             .finish()
     }
+}
+
+impl EvalCtx {
+
 }

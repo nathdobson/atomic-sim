@@ -48,13 +48,6 @@ impl Layout {
     pub fn pad_to_align(&self) -> Self {
         Layout::from_bits(align_to(self.bits, self.bit_align), self.bit_align)
     }
-    // pub fn aggregate<T: IntoIterator<Item=Layout>>(packed: bool, iter: T) -> Self {
-    //     let mut result = Layout::from_bits(0, 8);
-    //     for f in iter {
-    //         result = result.extend(packed, f).0;
-    //     }
-    //     result
-    // }
 }
 
 impl AggrLayout {

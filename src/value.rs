@@ -75,15 +75,6 @@ impl Value {
             vec: bytes.to_vec(),
         }
     }
-    // pub fn with_bytes(bits: u64, bytes: [u8; 16]) -> Self {
-    //     Value::Int { bits, value: u128::from_le_bytes(bytes) }
-    // }
-    // pub fn layout(&self) -> Layout {
-    //     match self {
-    //         Value::Int { bits, .. } => Layout::of_int(*bits),
-    //         Value::Aggregate(vs) => vs.iter().map(|v| v.layout()).collect::<Layout>().pad_to_align(),
-    //     }
-    // }
     pub fn sext(&self, to: u64) -> Value {
         match (self.bits(), to) {
             (8, 16) => Value::from(self.unwrap_i8() as i16),
@@ -117,44 +108,8 @@ impl Value {
         let result = Self::new(bits, self.as_u128() & mask);
         result
     }
-    pub fn sdiv(&self, rhs: &Self) -> Self {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_i64() / y.unwrap_i64()),
-            (8, 8) => Value::from(x.unwrap_i8() / y.unwrap_i8()),
-            bits => todo!("{:?}", bits),
-        }
-    }
-    pub fn srem(&self, rhs: &Self) -> Self {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_i64() % y.unwrap_i64()),
-            (8, 8) => Value::from(x.unwrap_i8() % y.unwrap_i8()),
-            bits => todo!("{:?}", bits),
-        }
-    }
 }
 
-// impl Index<u64> for Value {
-//     type Output = Value;
-//
-//     fn index(&self, index: u64) -> &Self::Output {
-//         match self {
-//             Value::Int { .. } => panic!("Indexing an int"),
-//             Value::Aggregate { children, is_packed } => &children[index as usize],
-//         }
-//     }
-// }
-//
-// impl IndexMut<u64> for Value {
-//     fn index_mut(&mut self, index: u64) -> &mut Self::Output {
-//         match self {
-//             Value::Int { .. } => panic!("Indexing an int"),
-//             Value::Aggregate { children, is_packed } => &mut children[index as usize],
-//         }
-//     }
-// }
-//
 impl From<()> for Value {
     fn from(_: ()) -> Self {
         Value::new(0, 0)
@@ -233,26 +188,68 @@ impl From<usize> for Value {
     }
 }
 
-impl Add for &Value {
-    type Output = Value;
-    fn add(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.as_u64() + y.as_u64()),
-            bits => todo!("{:?}", bits)
+macro_rules! unsigned_binop {
+    ($fun:ident, $x:ident, $y:ident)=>{
+        match ($x.bits(), $y.bits()) {
+            (8, 8) => return Value::from($x.unwrap_u8().$fun($y.unwrap_u8())),
+            (16, 16) => return Value::from($x.unwrap_u16().$fun($y.unwrap_u16())),
+            (32, 32) => return Value::from($x.unwrap_u32().$fun($y.unwrap_u32())),
+            (64, 64) => return Value::from($x.unwrap_u64().$fun($y.unwrap_u64())),
+            (128, 128) => return Value::from($x.unwrap_u128().$fun($y.unwrap_u128())),
+            _ => {}
         }
     }
 }
 
-impl BitXor for &Value {
-    type Output = Value;
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (1, 1) => Value::from(x.unwrap_bool() ^ y.unwrap_bool()),
-            (64, 64) => Value::from(x.unwrap_u64() ^ y.unwrap_u64()),
-            bits => todo!("{:?}", bits)
+macro_rules! signed_binop {
+    ($fun:ident, $x:ident, $y:ident)=>{
+        match ($x.bits(), $y.bits()) {
+            (8, 8) => return Value::from($x.unwrap_i8().$fun($y.unwrap_i8())),
+            (16, 16) => return Value::from($x.unwrap_i16().$fun($y.unwrap_i16())),
+            (32, 32) => return Value::from($x.unwrap_i32().$fun($y.unwrap_i32())),
+            (64, 64) => return Value::from($x.unwrap_i64().$fun($y.unwrap_i64())),
+            (128, 128) => return Value::from($x.unwrap_i128().$fun($y.unwrap_i128())),
+            _ => {}
         }
+    }
+}
+
+macro_rules! bool_binop {
+    ($fun:ident, $x:ident, $y:ident) => {
+        match ($x.bits(), $y.bits()) {
+            (1, 1) => return Value::from($x.unwrap_bool().$fun(&$y.unwrap_bool())),
+            _ => {}
+        }
+    }
+}
+
+impl Value {
+    pub fn sdiv(&self, rhs: &Self) -> Self {
+        signed_binop!(wrapping_div, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
+    }
+
+    pub fn srem(&self, rhs: &Self) -> Self {
+        signed_binop!(wrapping_rem, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
+    }
+}
+
+
+impl Add for &Value {
+    type Output = Value;
+    fn add(self, rhs: Self) -> Self::Output {
+        unsigned_binop!(wrapping_add, self, rhs);
+        todo!("{:?} {:?}", self, rhs);
+    }
+}
+
+impl Div for &Value {
+    type Output = Value;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        unsigned_binop!(wrapping_div, self, rhs);
+        todo!("{:?} {:?}", self, rhs);
     }
 }
 
@@ -260,11 +257,8 @@ impl Rem for &Value {
     type Output = Value;
 
     fn rem(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() % y.unwrap_u64()),
-            bits => todo!("{:?}", bits),
-        }
+        unsigned_binop!(wrapping_rem, self, rhs);
+        todo!("{:?} {:?}", self, rhs);
     }
 }
 
@@ -272,11 +266,8 @@ impl Mul for &Value {
     type Output = Value;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() * y.unwrap_u64()),
-            bits => todo!("{:?}", bits),
-        }
+        unsigned_binop!(wrapping_mul, self, rhs);
+        todo!("{:?} {:?}", self, rhs);
     }
 }
 
@@ -285,52 +276,28 @@ impl Sub for &Value {
     type Output = Value;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64().wrapping_sub(y.unwrap_u64())),
-            (8, 8) => Value::from(x.unwrap_u8().wrapping_sub(y.unwrap_u8())),
-            bits => todo!("{:?}", bits),
-        }
+        unsigned_binop!(wrapping_sub, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
     }
 }
 
-impl BitAnd for &Value {
-    type Output = Value;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (8, 8) => Value::from(x.unwrap_u8() & y.unwrap_u8()),
-            (32, 32) => Value::from(x.unwrap_u32() & y.unwrap_u32()),
-            (64, 64) => Value::from(x.unwrap_u64() & y.unwrap_u64()),
-            bits => todo!("{:?}", bits),
-        }
-    }
-}
-
-impl Div for &Value {
-    type Output = Value;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() / y.unwrap_u64()),
-            (8, 8) => Value::from(x.unwrap_u8() / y.unwrap_u8()),
-            bits => todo!("{:?}", bits),
-        }
-    }
-}
 
 impl Shr for &Value {
     type Output = Value;
 
     fn shr(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() >> y.unwrap_u64()),
-            (8, 8) => Value::from(x.unwrap_u8() >> y.unwrap_u8()),
-            bits => todo!("{:?}", bits),
-        }
+        unsigned_binop!(shr, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
+    }
+}
+
+
+impl Shl for &Value {
+    type Output = Value;
+
+    fn shl(self, rhs: Self) -> Self::Output {
+        unsigned_binop!(shl, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
     }
 }
 
@@ -338,24 +305,27 @@ impl BitOr for &Value {
     type Output = Value;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() | y.unwrap_u64()),
-            (8, 8) => Value::from(x.unwrap_u8() | y.unwrap_u8()),
-            bits => todo!("{:?}", bits),
-        }
+        unsigned_binop!(bitor, self, rhs);
+        bool_binop!(bitor, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
     }
 }
 
-impl Shl for &Value {
+impl BitAnd for &Value {
     type Output = Value;
 
-    fn shl(self, rhs: Self) -> Self::Output {
-        let (x, y) = (self, rhs);
-        match (x.bits(), y.bits()) {
-            (64, 64) => Value::from(x.unwrap_u64() << y.unwrap_u64()),
-            (8, 8) => Value::from(x.unwrap_u8() << y.unwrap_u8()),
-            bits => todo!("{:?}", bits),
-        }
+    fn bitand(self, rhs: Self) -> Self::Output {
+        unsigned_binop!(bitand, self, rhs);
+        bool_binop!(bitand, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
+    }
+}
+
+impl BitXor for &Value {
+    type Output = Value;
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        unsigned_binop!(bitxor, self, rhs);
+        bool_binop!(bitxor, self, rhs);
+        todo!("{:?} {:?}", self, rhs)
     }
 }

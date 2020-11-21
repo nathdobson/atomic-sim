@@ -22,6 +22,9 @@ mod value;
 mod memory;
 mod ctx;
 mod native;
+mod exec_ctx;
+mod types;
+mod eval;
 
 pub fn main() {
     let mut modules = vec![];
@@ -38,7 +41,7 @@ pub fn main() {
     println!("Running");
     let ctx = Ctx::new(&modules, &native);
     let mut process = Process::new(&ctx);
-    process.add_thread(Symbol::External("main"));//_ZN5tests4main17ha41f27c751ad6143E
+    process.add_thread(Symbol::External("main"));
     println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| { while process.step() {} })));
     println!("{:#?}", process);
 }
