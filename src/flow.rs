@@ -1,4 +1,4 @@
-use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type};
+use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type, HasDebugLoc};
 use llvm_ir::instruction::{Call, InlineAssembly, Phi, Alloca, Store, Load, Xor, SExt, BitCast, InsertValue, ZExt, AtomicRMW, Trunc, Select, PtrToInt, Sub, Or, And, IntToPtr, UDiv, SDiv, URem, SRem, Shl, LShr, AShr, ExtractValue, Mul, CmpXchg, Fence};
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
@@ -439,10 +439,22 @@ impl<'ctx> Debug for Frame<'ctx> {
 
 impl<'ctx> Debug for InstrPtr<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let debug = if let Some(instr) = self.block.instrs.get(self.index) {
+            instr.get_debug_loc()
+        } else {
+            self.block.term.get_debug_loc()
+        };
+        let debug = if let Some(debug) = debug {
+            format!("{}", debug)
+        } else {
+            format!("")
+        };
         f.debug_struct("InstrPtr")
             .field("block", &self.block.name)
             .field("index", &self.index)
-            .field("stuck", &self.stuck).finish()
+            .field("stuck", &self.stuck)
+            .field("??", &debug)
+            .finish()
     }
 }
 

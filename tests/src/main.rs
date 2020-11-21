@@ -1,3 +1,5 @@
+use std::thread;
+
 fn main() {
-    panic!("Hello World");
+    thread::spawn(move || println!("Hello World")).join();
 }

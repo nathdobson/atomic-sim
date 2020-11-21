@@ -147,6 +147,56 @@ impl NativeFunction {
                 }),
             },
             NativeFunction {
+                name: "pthread_self".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    p.ctx().value_from_address(0)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_get_stackaddr_np".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    p.ctx().value_from_address(0)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_get_stacksize_np".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    p.ctx().value_from_address(0)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_attr_init".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    let value = [0xFFu8; 64];
+                    p.store(tctx, args[0], &Value::from_bytes(&value, Layout::from_bytes(value.len() as u64, 1)), None);
+                    Value::from(0u32)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_attr_setstacksize".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    Value::from(0u32)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_create".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    Value::from(0u32)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_attr_destroy".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    Value::from(0u32)
+                }),
+            },
+            NativeFunction {
+                name: "pthread_join".to_string(),
+                imp: Box::new(|p, tctx, args| {
+                    Value::from(0u32)
+                }),
+            },
+            NativeFunction {
                 name: "_tlv_atexit".to_string(),
                 imp: Box::new(|p, tctx, _| {
                     //TODO synchronize lock
@@ -204,24 +254,6 @@ impl NativeFunction {
                 name: "llvm.trap".to_string(),
                 imp: Box::new(|p, tctx, args| {
                     panic!("It's a trap!");
-                }),
-            },
-            NativeFunction {
-                name: "pthread_self".to_string(),
-                imp: Box::new(|p, tctx, args| {
-                    p.ctx().value_from_address(0)
-                }),
-            },
-            NativeFunction {
-                name: "pthread_get_stackaddr_np".to_string(),
-                imp: Box::new(|p, tctx, args| {
-                    p.ctx().value_from_address(0)
-                }),
-            },
-            NativeFunction {
-                name: "pthread_get_stacksize_np".to_string(),
-                imp: Box::new(|p, tctx, args| {
-                    p.ctx().value_from_address(0)
                 }),
             },
             NativeFunction {
