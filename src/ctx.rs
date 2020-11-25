@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::fmt;
-use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type, Constant, constant};
+use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type, Constant, constant, Operand};
 use std::collections::HashMap;
 use llvm_ir::types::NamedStructDef;
 use crate::value::{Value, add_u64_i64};
@@ -8,6 +8,10 @@ use crate::layout::{Layout, AggrLayout};
 use crate::memory::{Memory, Symbol};
 use crate::native::NativeFunction;
 
+pub struct SymbolTable<'ctx> {
+    forward: HashMap<Symbol<'ctx>, Value>,
+    reverse: HashMap<Value, Symbol<'ctx>>,
+}
 
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
@@ -15,6 +19,7 @@ pub struct Ctx<'ctx> {
     pub native: HashMap<Symbol<'ctx>, &'ctx NativeFunction>,
     pub ptr_bits: u64,
     pub page_size: u64,
+    symbols: SymbolTable<'ctx>,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -24,7 +29,6 @@ pub struct EvalCtx {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ThreadCtx {
-    pub ectx: EvalCtx,
     pub threadid: usize,
 }
 
@@ -45,8 +49,18 @@ impl<'ctx> CompiledFunction<'ctx> {
     }
 }
 
+impl<'ctx> SymbolTable<'ctx> {
+    pub fn add_symbol(&mut self, memory: &mut Memory<'ctx>, name: Symbol<'ctx>, layout: Layout) -> Value {
+        let address = memory.alloc(layout);
+        //println!("Add symbol {:?} {:?} {:?}", name, layout, address);
+        assert!(self.forward.insert(name.clone(), address.clone()).is_none());
+        assert!(self.reverse.insert(address.clone(), name).is_none());
+        address
+    }
+}
+
 impl<'ctx> Ctx<'ctx> {
-    pub fn new(modules: &'ctx [Module], native: &'ctx [NativeFunction]) -> Ctx<'ctx> {
+    pub fn new(modules: &'ctx [Module], native: &'ctx [NativeFunction], memory: &mut Memory<'ctx>) -> Ctx<'ctx> {
         let functions =
             modules.iter()
                 .enumerate()
@@ -57,7 +71,20 @@ impl<'ctx> Ctx<'ctx> {
                 })
                 .collect();
         let native = native.iter().map(|f| (Symbol::External(&f.name), f)).collect();
-        Ctx { modules, functions, native, ptr_bits: 64, page_size: 4096 }
+
+        let mut ctx = Ctx {
+            modules,
+            functions,
+            native,
+            ptr_bits: 64,
+            page_size: 4096,
+            symbols: SymbolTable {
+                forward: HashMap::new(),
+                reverse: HashMap::new(),
+            },
+        };
+        ctx.initialize_globals(memory);
+        ctx
     }
     pub fn named_struct_def(&self, x: &str) -> Option<&'ctx NamedStructDef> {
         self.modules.iter().find_map(|m| m.types.named_struct_def(x))
@@ -176,6 +203,160 @@ impl<'ctx> Ctx<'ctx> {
             }
         }
     }
+
+    fn initialize_globals(&mut self, memory: &mut Memory<'ctx>) {
+        let func_layout = Layout::from_bytes(256, 1);
+        for (name, _) in self.native.iter() {
+            self.symbols.add_symbol(memory, *name, func_layout);
+        }
+        let mut inits = vec![];
+        for (mi, module) in self.modules.iter().enumerate() {
+            for f in module.functions.iter() {
+                let loc = self.symbols.add_symbol(memory, Symbol::new(f.linkage, mi, &f.name), func_layout);
+            }
+            for g in module.global_vars.iter() {
+                let symbol = Symbol::new(g.linkage, mi, str_of_name(&g.name));
+                let mut layout = self.layout(&self.target_of(&g.ty));
+                layout = Layout::from_bits(layout.bits(), layout.bit_align().max(8 * g.alignment as u64));
+                let loc = self.symbols.add_symbol(memory, symbol, layout);
+                inits.push((mi, symbol, layout, g, loc));
+            }
+        }
+        for (mi, symbol, layout, g, loc) in inits {
+            let (ty, value) =
+                self.get_constant(EvalCtx { module: Some(mi) }, g.initializer.as_ref().unwrap());
+            assert_eq!(ty, self.target_of(&g.ty), "{} == {}", ty, g.ty);
+            memory.store(&loc, &value, None);
+        }
+        for (mi, module) in self.modules.iter().enumerate() {
+            for g in module.global_vars.iter() {
+                let symbol = Symbol::new(g.linkage, mi, str_of_name(&g.name));
+            }
+        }
+    }
+
+    pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
+        self.symbols.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
+    }
+    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
+        if let Some(internal) = self.symbols.forward.get(&Symbol::Internal(ectx.module.unwrap(), name)) {
+            internal
+        } else if let Some(external) = self.symbols.forward.get(&Symbol::External(name)) {
+            external
+        } else {
+            panic!("No symbol named {:?}", name)
+        }
+    }
+    pub fn get_constant(&self, ectx: EvalCtx, c: &'ctx Constant) -> (TypeRef, Value) {
+        match c {
+            Constant::Int { bits, value } => {
+                (self.modules[0].types.int(*bits).clone(), Value::new(*bits as u64, *value as u128))
+            }
+            Constant::BitCast(bitcast) => {
+                let (_, value) = self.get_constant(ectx, &*bitcast.operand);
+                (bitcast.to_type.clone(), value)
+            }
+            Constant::IntToPtr(inttoptr) => {
+                let (_, value) = self.get_constant(ectx, &*inttoptr.operand);
+                (inttoptr.to_type.clone(), value)
+            }
+            Constant::PtrToInt(ptrtoint) => {
+                let (_, value) = self.get_constant(ectx, &*ptrtoint.operand);
+                (ptrtoint.to_type.clone(), value)
+            }
+            Constant::GlobalReference { name, ty } => {
+                let name = match name {
+                    Name::Name(name) => name,
+                    Name::Number(_) => panic!(),
+                };
+                (self.pointer_to(ty.clone()), self.lookup(ectx, name).clone())
+            }
+            Constant::Undef(typ) => {
+                (typ.clone(), self.aggregate_zero(typ))
+            }
+            Constant::Null(typ) => {
+                (typ.clone(), self.aggregate_zero(typ))
+            }
+            Constant::Struct { name, values, is_packed, } => {
+                let children = values.iter().map(|c| self.get_constant(ectx, c)).collect::<Vec<_>>();
+                let ty = if let Some(name) = name {
+                    self.type_of_struct(name).clone()
+                } else {
+                    self.struct_of(children.iter().map(|(ty, v)| ty.clone()).collect(), *is_packed)
+                };
+                (ty, Value::aggregate(children.iter().map(|(ty, v)| v.clone()), *is_packed))
+            }
+            Constant::Array { element_type, elements } => {
+                (self.array_of(element_type.clone(), elements.len()),
+                 Value::aggregate(elements.iter().map(|c| {
+                     let (ty, v) = self.get_constant(ectx, c);
+                     assert_eq!(ty, *element_type);
+                     v
+                 }), false))
+            }
+            Constant::GetElementPtr(constant::GetElementPtr { address, indices, in_bounds }) => {
+                let (ty, address) = self.get_constant(ectx, address);
+                let indices = indices.iter().map(|c| self.get_constant(ectx, c).1.as_i64()).collect::<Vec<_>>();
+                let (ty, val) = self.offset_of(&ty, indices.iter().cloned());
+                (self.pointer_to(ty.clone()), self.value_from_address(add_u64_i64(address.as_u64(), val)))
+            }
+            Constant::AggregateZero(typ) => {
+                (typ.clone(), self.aggregate_zero(typ))
+            }
+            x => todo!("{:?}", x),
+        }
+    }
+    pub fn target_of(&self, ty: &TypeRef) -> TypeRef {
+        match &**ty {
+            Type::PointerType { pointee_type, .. } => pointee_type.clone(),
+            _ => todo!("{:?}", ty),
+        }
+    }
+    pub fn type_of(&self, ectx: EvalCtx, oper: &'ctx Operand) -> TypeRef {
+        match oper {
+            Operand::LocalOperand { ty, .. } => {
+                ty.clone()
+            }
+            Operand::ConstantOperand(c) => {
+                self.get_constant(ectx, c).0
+            }
+            x => todo!("{:?}", x),
+        }
+    }
+    pub fn offset_of(&self, ty: &'ctx TypeRef, vs: impl Iterator<Item=i64>) -> (TypeRef, i64) {
+        let mut offset = 0i64;
+        let mut ty = ty.clone();
+        for i in vs {
+            let (ty2, offset2) = self.field(&ty, i);
+            offset += offset2;
+            ty = ty2;
+        }
+        (ty, offset)
+    }
+    pub fn field(&self, ty: &'ctx Type, index: i64) -> (TypeRef, i64) {
+        match ty {
+            Type::PointerType { pointee_type, .. } => {
+                (pointee_type.clone(), index * (self.layout(&*pointee_type).bytes() as i64))
+            }
+            Type::StructType { element_types, is_packed } => {
+                let layout = AggrLayout::new(*is_packed,
+                                             element_types
+                                                 .iter()
+                                                 .map(|t| self.layout(t)));
+                let offset_bits = layout.bit_offset(index as usize);
+                assert!(offset_bits % 8 == 0);
+                (element_types[index as usize].clone(), (offset_bits / 8) as i64)
+            }
+            Type::ArrayType { element_type, num_elements } => {
+                (element_type.clone(), index * (self.layout(&element_type).bytes() as i64))
+            }
+            Type::NamedStructType { name } => {
+                self.field(self.type_of_struct(name), index)
+            }
+            ty => todo!("{:?}", ty),
+        }
+    }
+
 }
 
 
@@ -198,6 +379,11 @@ impl<'ctx> Debug for Ctx<'ctx> {
     }
 }
 
-impl EvalCtx {
+impl EvalCtx {}
 
+fn str_of_name(name: &Name) -> &str {
+    match name {
+        Name::Name(name) => &***name,
+        Name::Number(_) => panic!(),
+    }
 }

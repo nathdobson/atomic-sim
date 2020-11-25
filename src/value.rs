@@ -85,6 +85,18 @@ impl Value {
             _ => todo!("{:?} -> {:?}", self.bits(), to),
         }
     }
+    pub fn sshr(&self, other:&Value) -> Value {
+        match (self.bits(), other.bits()) {
+            (8, 8) => Value::from(self.unwrap_i8() << other.unwrap_u8()),
+            (16, 16) => Value::from(self.unwrap_i16() << other.unwrap_u16()),
+            (32, 32) => Value::from(self.unwrap_i32() << other.unwrap_u32()),
+            (64, 64) => Value::from(self.unwrap_i64() << other.unwrap_u64()),
+            bits => todo!("{:?}", bits),
+        }
+    }
+    pub fn zext(&self, to: u64) -> Value {
+        Self::new(to, self.as_u128())
+    }
     pub fn layout(&self) -> Layout {
         self.layout
     }
@@ -104,7 +116,7 @@ impl Value {
         }
     }
     pub fn truncate(&self, bits: u64) -> Self {
-        let mask = ((1u128 << bits) - 1);
+        let mask = (1u128 << bits) - 1;
         let result = Self::new(bits, self.as_u128() & mask);
         result
     }

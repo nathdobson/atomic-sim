@@ -1,5 +1,5 @@
-use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type, HasDebugLoc};
-use llvm_ir::instruction::{Call, InlineAssembly, Phi, Alloca, Store, Load, Xor, SExt, BitCast, InsertValue, ZExt, AtomicRMW, Trunc, Select, PtrToInt, Sub, Or, And, IntToPtr, UDiv, SDiv, URem, SRem, Shl, LShr, AShr, ExtractValue, Mul, CmpXchg, Fence};
+use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type, HasDebugLoc, IntPredicate};
+use llvm_ir::instruction::{Call, InlineAssembly, Phi, Alloca, Store, Load, Xor, SExt, BitCast, InsertValue, ZExt, AtomicRMW, Trunc, Select, PtrToInt, Sub, Or, And, IntToPtr, UDiv, SDiv, URem, SRem, Shl, LShr, AShr, ExtractValue, Mul, CmpXchg, Fence, MemoryOrdering, RMWBinOp};
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
 use std::fmt::{Debug, Formatter, Display};
@@ -13,148 +13,175 @@ use llvm_ir::constant::Constant::Undef;
 use llvm_ir::types::NamedStructDef;
 use llvm_ir::function::ParameterAttribute;
 use std::mem::size_of;
-use crate::value::Value;
+use crate::value::{Value, add_u64_i64};
 use crate::memory::{Memory, Symbol};
-use crate::ctx::{Ctx, CompiledFunction, EvalCtx};
+use crate::ctx::{Ctx, CompiledFunction, EvalCtx, ThreadCtx};
 use crate::native::NativeFunction;
+use crate::exec::Process;
+use std::future::Future;
+use std::task::{Context, Poll};
+use std::pin::Pin;
+use crate::data_flow::{DataFlow, ComputeArgs};
+use futures::{pending, FutureExt};
+use crate::data_flow::Thunk;
+use futures::future::LocalBoxFuture;
+use futures::task::noop_waker_ref;
 
-const PIPELINE_SIZE: usize = 1;
 
 pub struct Thread<'ctx> {
     threadid: usize,
-    seq: usize,
-    ctx: &'ctx Ctx<'ctx>,
-    frames: Vec<Frame<'ctx>>,
-    pub thunks: BTreeMap<usize, Rc<Thunk<'ctx>>>,
-}
-
-struct InstrPtr<'ctx> {
-    block: &'ctx BasicBlock,
-    index: usize,
-    stuck: Option<Vec<Rc<Thunk<'ctx>>>>,
+    control: LocalBoxFuture<'ctx, ()>,
+    data: Rc<DataFlow<'ctx>>,
 }
 
 pub struct Frame<'ctx> {
+    ctx: &'ctx Ctx<'ctx>,
     fun: &'ctx CompiledFunction<'ctx>,
     origin: Option<&'ctx Name>,
-    ip: InstrPtr<'ctx>,
     temps: HashMap<&'ctx Name, Rc<Thunk<'ctx>>>,
     allocs: Vec<Rc<Thunk<'ctx>>>,
     result: Option<&'ctx Name>,
 }
 
-pub enum Node<'ctx> {
-    Instr(&'ctx Instruction),
-    Constant(&'ctx Constant),
-    Value(Value),
-    Metadata,
-    Return(Option<Rc<Thunk<'ctx>>>, Vec<Rc<Thunk<'ctx>>>),
-    Native(&'ctx NativeFunction),
+enum DecodeResult<'ctx> {
+    Jump(&'ctx Name),
+    Return(Option<Rc<Thunk<'ctx>>>),
 }
 
+// pub enum Node<'ctx> {
+//     Instr(&'ctx Instruction),
+//     Constant(&'ctx Constant),
+//     Value(Value),
+//     Metadata,
+//     Return(Option<Rc<Thunk<'ctx>>>, Vec<Rc<Thunk<'ctx>>>),
+//     Native(&'ctx NativeFunction),
+// }
+//
 
-pub struct Thunk<'ctx> {
-    pub threadid: usize,
-    pub seq: usize,
-    pub deps: Vec<Rc<Thunk<'ctx>>>,
-    pub node: Node<'ctx>,
-    pub value: RefCell<Option<Value>>,
-    pub ectx: EvalCtx,
-}
 
-#[derive(Debug)]
-pub enum DecodeResult { Exit, Step, Stuck }
+//#[derive(Debug)]
+//pub enum DecodeResult { Exit, Step, Stuck }
 
 impl<'ctx> Thread<'ctx> {
     pub fn new(ctx: &'ctx Ctx<'ctx>, main: Symbol<'ctx>, threadid: usize, params: &[Value]) -> Self {
         let main = ctx.functions.get(&main).unwrap();
-        let frames = vec![Frame {
+        let data = Rc::new(DataFlow::new(threadid));
+        let mut frame = Frame {
+            ctx,
             fun: main,
             origin: None,
-            ip: InstrPtr {
-                block: main.src.basic_blocks.first().unwrap(),
-                index: 0,
-                stuck: None,
-            },
-            temps: HashMap::new(),
+            temps: Default::default(),
             allocs: vec![],
             result: None,
-        }];
-        let thunks = BTreeMap::new();
-        let mut thread = Thread { threadid, seq: 0, ctx, frames, thunks };
-        for (name, value) in main.src.parameters.iter().zip(params.iter()) {
-            thread.add_thunk(Some(&name.name),
-                             Node::Value(value.clone()),
-                             vec![]);
-        }
-        thread
-    }
-    fn top_mut(&mut self) -> &mut Frame<'ctx> {
-        self.frames.last_mut().unwrap()
-    }
-    fn top(&self) -> &Frame<'ctx> {
-        self.frames.last().unwrap()
-    }
-    pub fn decode(&mut self, memory: &Memory<'ctx>) -> bool {
-        while self.thunks.len() < PIPELINE_SIZE {
-            match self.decode_once(memory) {
-                DecodeResult::Exit => return false,
-                DecodeResult::Step => {}
-                DecodeResult::Stuck => return true,
+        };
+        let params = params.to_vec();
+        let control = Box::pin({
+            let data = data.clone();
+            async move {
+                for (name, value) in main.src.parameters.iter().zip(params.into_iter()) {
+                    frame.add_thunk(&data,
+                                    Some(&name.name),
+                                    vec![], |_| value).await;
+                }
+                frame.decode(&*data.clone()).await;
             }
-        }
-        true
+        });
+        Thread { threadid, control, data }
+        // let frames = vec![Frame {
+        //     fun: main,
+        //     origin: None,
+        //     ip: InstrPtr {
+        //         block: main.src.basic_blocks.first().unwrap(),
+        //         index: 0,
+        //         stuck: None,
+        //     },
+        //     temps: HashMap::new(),
+        //     allocs: vec![],
+        //     result: None,
+        // }];
+        // let thunks = BTreeMap::new();
+        // let mut thread = Thread { threadid, seq: 0, ctx, frames, thunks };
+        // for (name, value) in main.src.parameters.iter().zip(params.iter()) {
+        //     thread.add_thunk(Some(&name.name),
+        //                      Node::Value(value.clone()),
+        //                      vec![]);
+        // }
+        // thread
     }
-    pub fn decode_once(&mut self, memory: &Memory<'ctx>) -> DecodeResult {
-        if self.frames.is_empty() {
-            return DecodeResult::Exit;
+    // fn top_mut(&mut self) -> &mut Frame<'ctx> {
+    //     self.frames.last_mut().unwrap()
+    // }
+    // fn top(&self) -> &Frame<'ctx> {
+    //     self.frames.last().unwrap()
+    // }
+    pub fn step(&mut self) -> impl FnOnce(&mut Process<'ctx>) -> bool {
+        let step_control = self.control.as_mut().poll(&mut Context::from_waker(noop_waker_ref())).is_pending();
+        let cont = (self.data.step(ThreadCtx { threadid: self.threadid }));
+        move |process| {
+            let step_data = cont(process);
+            step_control || step_data
         }
-        let frame = self.frames.len() - 1;
-        let index = self.frames[frame].ip.index;
-        let block = self.frames[frame].ip.block;
-        if let Some(deps) = self.frames[frame].ip.stuck.as_ref() {
-            if deps.iter().any(|dep| dep.get().is_none()) {
-                return DecodeResult::Stuck;
+    }
+}
+
+impl<'ctx> Frame<'ctx> {
+    pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>) -> impl Future<Output=Option<Rc<Thunk<'ctx>>>> + 'a {
+        async move { self.decode_impl(data).await }.boxed_local()
+    }
+    pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>) -> Option<Rc<Thunk<'ctx>>> {
+        let mut block = self.fun.src.basic_blocks.get(0).unwrap();
+        loop {
+            for instr in block.instrs.iter() {
+                self.decode_instr(data, instr).await;
             }
-        }
-        if index < block.instrs.len() {
-            self.decode_instr(memory, &block.instrs[index])
-        } else {
-            self.frames[frame].origin = Some(&block.name);
-            self.decode_term(memory, &block.term);
-            DecodeResult::Step
+            block = match self.decode_term(data, &block.term).await {
+                DecodeResult::Jump(name) => *self.fun.blocks.get(name).unwrap(),
+                DecodeResult::Return(result) => return result,
+            };
         }
     }
-    fn decode_instr(&mut self, memory: &Memory<'ctx>, instr: &'ctx Instruction) -> DecodeResult {
+    async fn decode_instr<'a>(&'a mut self, data: &'a DataFlow<'ctx>, instr: &'ctx Instruction) {
         match instr {
             Instruction::Phi(phi) => {
                 let (oper, _) =
                     phi.incoming_values.iter()
-                        .find(|(_, name)| Some(name) == self.top().origin).unwrap();
-                let deps = vec![self.get_temp(oper)];
-                self.add_thunk(Some(&phi.dest), Node::Instr(instr), deps);
+                        .find(|(_, name)| Some(name) == self.origin).unwrap();
+                let deps = vec![self.get_temp(data, oper).await];
+                self.add_thunk(data, Some(&phi.dest), deps, |args| args.args[0].clone()).await;
             }
             Instruction::Call(call) => {
-                let frame = self.frames.len() - 1;
-                if self.decode_call(memory, &call.function, &call.arguments, call.dest.as_ref()) {
-                    self.frames[frame].ip.index += 1;
-                    self.frames[frame].ip.stuck = None;
-                }
-                return DecodeResult::Step;
+                self.decode_call(data, &call.function, &call.arguments, call.dest.as_ref()).await;
             }
             Instruction::Alloca(alloca) => {
-                let thunk = self.add_thunk(Some(&alloca.dest), Node::Instr(instr), vec![]);
-                self.top_mut().allocs.push(thunk);
+                let num = self.get_temp(data, &alloca.num_elements).await;
+                let layout = self.ctx.layout(&alloca.allocated_type);
+                let thunk = self.add_thunk(
+                    data,
+                    Some(&alloca.dest),
+                    vec![num],
+                    move |args| {
+                        let layout = layout.repeat(args.args[0].as_u64());
+                        args.process.alloc(args.tctx, layout)
+                    },
+                ).await;
+                self.allocs.push(thunk);
             }
             Instruction::Store(store) => {
                 let deps = vec![
-                    self.get_temp(&store.address),
-                    self.get_temp(&store.value)];
-                self.add_thunk(None, Node::Instr(instr), deps);
+                    self.get_temp(data, &store.address).await,
+                    self.get_temp(data, &store.value).await];
+
+                self.add_thunk(data, None, deps, move |args| {
+                    args.process.store(args.tctx, args.args[0], args.args[1], store.atomicity.as_ref());
+                    Value::from(())
+                }).await;
             }
             Instruction::Load(load) => {
-                let deps = vec![self.get_temp(&load.address)];
-                self.add_thunk(Some(&load.dest), Node::Instr(instr), deps);
+                let deps = vec![self.get_temp(data, &load.address).await];
+                let layout = self.ctx.layout(&self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, &load.address)));
+                self.add_thunk(data, Some(&load.dest), deps, move |args| {
+                    args.process.load(args.tctx, args.args[0], layout, load.atomicity.as_ref())
+                }).await;
             }
             Instruction::Add(Add { dest, operand0, operand1, .. }) |
             Instruction::Sub(Sub { dest, operand0, operand1, .. }) |
@@ -171,254 +198,288 @@ impl<'ctx> Thread<'ctx> {
             Instruction::AShr(AShr { dest, operand0, operand1, .. }) |
             Instruction::ICmp(ICmp { dest, operand0, operand1, .. })
             => {
-                let deps = vec![self.get_temp(operand0), self.get_temp(operand1)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+                let deps = vec![self.get_temp(data, operand0).await, self.get_temp(data, operand1).await];
+                let ctx = self.ctx;
+                self.add_thunk(data, Some(dest), deps, move |args|
+                    Self::binary(ctx, instr, args.args[0], args.args[1])).await;
             }
             Instruction::SExt(SExt { dest, operand, .. }) |
             Instruction::ZExt(ZExt { dest, operand, .. }) |
             Instruction::Trunc(Trunc { dest, operand, .. }) |
             Instruction::PtrToInt(PtrToInt { dest, operand, .. }) |
             Instruction::IntToPtr(IntToPtr { dest, operand, .. }) |
-            Instruction::BitCast(BitCast { dest, operand, .. })
-            => {
-                let deps = vec![self.get_temp(operand)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+            Instruction::BitCast(BitCast { dest, operand, .. }) => {
+                let deps = vec![self.get_temp(data, operand).await];
+                let ctx = self.ctx;
+                self.add_thunk(data, Some(dest), deps,
+                               move |args| Self::unary(ctx, instr, args.args[0])).await;
             }
-            Instruction::GetElementPtr(get_element_ptr) => {
-                let mut deps = vec![self.get_temp(&get_element_ptr.address)];
-                for ind in get_element_ptr.indices.iter() {
-                    deps.push(self.get_temp(ind));
+            Instruction::GetElementPtr(gep) => {
+                let mut deps = vec![self.get_temp(data, &gep.address).await];
+                for ind in gep.indices.iter() {
+                    deps.push(self.get_temp(data, ind).await);
                 }
-                self.add_thunk(Some(&get_element_ptr.dest), Node::Instr(instr), deps);
+                let ectx = self.fun.ectx;
+                let ty = self.ctx.type_of(self.fun.ectx, &gep.address);
+                let ctx = self.ctx;
+                self.add_thunk(data, Some(&gep.dest), deps, move |args| {
+                    let (_, offset) = ctx.offset_of(&ty,
+                                                    args.args[1..].iter().map(|v| v.as_i64()));
+                    ctx.value_from_address(add_u64_i64(args.args[0].as_u64(), offset))
+                }).await;
             }
-            Instruction::InsertValue(InsertValue { aggregate, element, dest, .. }) => {
-                let deps = vec![self.get_temp(aggregate), self.get_temp(element)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+            Instruction::InsertValue(InsertValue { aggregate, element, dest, indices, .. }) => {
+                let deps = vec![self.get_temp(data, aggregate).await, self.get_temp(data, element).await];
+                let ty = self.ctx.type_of(self.fun.ectx, aggregate);
+                let (_, offset) = self.ctx.offset_of(&ty, indices.iter().map(|i| *i as i64));
+                let offset = offset as usize;
+                self.add_thunk(data, Some(dest), deps, move |args| {
+                    let mut aggregate = args.args[0].clone();
+                    let element = args.args[1];
+                    let element = element.bytes();
+                    aggregate.bytes_mut()[offset..(offset + element.len())].copy_from_slice(element);
+                    aggregate
+                }).await;
             }
-            Instruction::AtomicRMW(AtomicRMW { address, value, dest, .. }) => {
-                let deps = vec![self.get_temp(address), self.get_temp(value)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+            Instruction::AtomicRMW(AtomicRMW { address, value, dest, operation, atomicity, .. }) => {
+                let deps = vec![self.get_temp(data, address).await, self.get_temp(data, value).await];
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, address));
+                let layout = self.ctx.layout(&ty);
+                self.add_thunk(data, Some(dest), deps, move |args| {
+                    let current = args.process.load(args.tctx, args.args[0], layout, Some(atomicity)).clone();
+                    let new = match operation {
+                        RMWBinOp::Add => &current + args.args[1],
+                        RMWBinOp::Sub => &current - args.args[1],
+                        RMWBinOp::Xchg => args.args[1].clone(),
+                        RMWBinOp::And => &current & args.args[1],
+                        RMWBinOp::Or => &current | args.args[1],
+                        RMWBinOp::Xor => &current ^ args.args[1],
+                        _ => todo!("{:?}", operation),
+                    };
+                    args.process.store(args.tctx, args.args[0], &new, Some(atomicity));
+                    current
+                }).await;
             }
             Instruction::Select(Select { condition, true_value, false_value, dest, .. }) => {
                 let deps =
-                    vec![self.get_temp(condition),
-                         self.get_temp(true_value),
-                         self.get_temp(false_value)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+                    vec![self.get_temp(data, condition).await,
+                         self.get_temp(data, true_value).await,
+                         self.get_temp(data, false_value).await];
+                self.add_thunk(data, Some(dest), deps, |args|
+                    if args.args[0].unwrap_bool() {
+                        args.args[1].clone()
+                    } else {
+                        args.args[2].clone()
+                    },
+                ).await;
             }
-            Instruction::ExtractValue(ExtractValue { aggregate, dest, .. }) => {
-                let deps = vec![self.get_temp(aggregate)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+            Instruction::ExtractValue(ExtractValue { aggregate, dest, indices, .. }) => {
+                let deps = vec![self.get_temp(data, aggregate).await];
+                let ty = self.ctx.type_of(self.fun.ectx, aggregate);
+                let (ty2, offset) = self.ctx.offset_of(&ty, indices.iter().map(|i| *i as i64));
+                let layout = self.ctx.layout(&ty2);
+                let offset = offset as usize;
+                self.add_thunk(data, Some(dest), deps, move |args| {
+                    let bytes = &args.args[0].bytes()[offset..offset + layout.bytes() as usize];
+                    Value::from_bytes(bytes, layout)
+                }).await;
             }
-            Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, .. }) => {
+            Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, atomicity, .. }) => {
                 let deps =
-                    vec![self.get_temp(address),
-                         self.get_temp(expected),
-                         self.get_temp(replacement)];
-                self.add_thunk(Some(dest), Node::Instr(instr), deps);
+                    vec![self.get_temp(data, address).await,
+                         self.get_temp(data, expected).await,
+                         self.get_temp(data, replacement).await];
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, address));
+                let layout = self.ctx.layout(&ty);
+                self.add_thunk(data, Some(dest), deps, move |args| {
+                    let (address, expected, replacement) = (args.args[0], args.args[1], args.args[2]);
+                    let old = args.process.load(args.tctx, address, layout, Some(atomicity));
+                    let success = &old == expected;
+                    if success {
+                        args.process.store(args.tctx, address, replacement, Some(atomicity));
+                    }
+                    Value::aggregate(vec![old.clone(), Value::from(success)].into_iter(), false)
+                }).await;
             }
             Instruction::Fence(Fence { atomicity, .. }) => {
                 //TODO
             }
             _ => todo!("{:?}", instr),
         }
-        self.top_mut().ip.index += 1;
-        self.top_mut().ip.stuck = None;
-        DecodeResult::Step
     }
-    fn jump(&mut self, dest: &'ctx Name) {
-        let next = &self.top().fun.blocks.get(dest)
-            .unwrap_or_else(|| panic!("Bad jump target {:?} in {:?}", dest, self.top().fun.src));
-        self.top_mut().ip = InstrPtr { block: next, index: 0, stuck: None };
+    fn unary(ctx: &'ctx Ctx, instr: &Instruction, value: &Value) -> Value {
+        match instr {
+            Instruction::SExt(SExt { to_type, .. }) =>
+                value.sext(ctx.layout(to_type).bits()),
+            Instruction::ZExt(ZExt { to_type, .. }) =>
+                value.zext(ctx.layout(to_type).bits()),
+            Instruction::Trunc(Trunc { to_type, .. }) |
+            Instruction::PtrToInt(PtrToInt { to_type, .. }) |
+            Instruction::IntToPtr(IntToPtr { to_type, .. }) |
+            Instruction::BitCast(BitCast { to_type, .. }) => {
+                let to_bits = ctx.layout(to_type).bits();
+                if to_bits < value.bits() {
+                    value.truncate(to_bits)
+                } else {
+                    value.zext(to_bits)
+                }
+            }
+            _ => unreachable!()
+        }
     }
+    fn binary(ctx: &'ctx Ctx, instr: &Instruction, x: &Value, y: &Value) -> Value {
+        match instr {
+            Instruction::Add(Add { .. }) => x + y,
+            Instruction::Sub(Sub { .. }) => x - y,
+            Instruction::Mul(Mul { .. }) => x * y,
+            Instruction::UDiv(UDiv { .. }) => x / y,
+            Instruction::SDiv(SDiv { .. }) => x.sdiv(y),
+            Instruction::URem(URem { .. }) => x % y,
+            Instruction::SRem(SRem { .. }) => x.srem(y),
+            Instruction::Xor(Xor { .. }) => x ^ y,
+            Instruction::And(And { .. }) => x & y,
+            Instruction::Or(Or { .. }) => x | y,
+            Instruction::Shl(Shl { .. }) => x << y,
+            Instruction::LShr(LShr { .. }) => x >> y,
+            Instruction::AShr(AShr { .. }) => x.sshr(y),
+            Instruction::ICmp(ICmp { predicate, .. }) => Value::from(Self::icmp(predicate, x, y)),
+            _ => todo!(),
+        }
+    }
+    fn icmp(predicate: &IntPredicate, x: &Value, y: &Value) -> bool {
+        match predicate {
+            IntPredicate::EQ => x.as_u128() == y.as_u128(),
+            IntPredicate::NE => x.as_u128() != y.as_u128(),
+            IntPredicate::ULE => x.as_u128() <= y.as_u128(),
+            IntPredicate::ULT => x.as_u128() < y.as_u128(),
+            IntPredicate::UGE => x.as_u128() >= y.as_u128(),
+            IntPredicate::UGT => x.as_u128() > y.as_u128(),
+            IntPredicate::SGT => x.as_i128() > y.as_i128(),
+            IntPredicate::SGE => x.as_i128() >= y.as_i128(),
+            IntPredicate::SLT => x.as_i128() < y.as_i128(),
+            IntPredicate::SLE => x.as_i128() <= y.as_i128(),
+            pred => todo!("{:?}", pred),
+        }
+    }
+    // fn jump(&mut self, dest: &'ctx Name) {
+    //     let next = &self.top().fun.blocks.get(dest)
+    //         .unwrap_or_else(|| panic!("Bad jump target {:?} in {:?}", dest, self.top().fun.src));
+    //     self.top_mut().ip = InstrPtr { block: next, index: 0, stuck: None };
+    // }
 
-    fn decode_term(&mut self, memory: &Memory<'ctx>, term: &'ctx Terminator) -> DecodeResult {
-        match &term {
+    async fn decode_term<'a>(&'a mut self, data: &'a DataFlow<'ctx>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
+        match term {
             Terminator::Br(br) => {
-                self.jump(&br.dest);
-                DecodeResult::Step
+                DecodeResult::Jump(&br.dest)
             }
             Terminator::Ret(ret) => {
-                let result =
-                    ret.return_operand.as_ref()
-                        .map(|oper| { self.get_temp(oper) });
-                let top = self.frames.pop().unwrap();
-                let allocs = top.allocs;
-                let mut deps = allocs.clone();
-                deps.extend(result.iter().cloned());
-                self.add_thunk(top.result, Node::Return(result, allocs), deps);
-                DecodeResult::Step
+                for x in self.allocs.iter() {
+                    data.add_thunk(vec![x.clone()], |args| {
+                        args.process.free(args.tctx, &args.args[0]);
+                        Value::from(())
+                    }).await;
+                }
+                let result = if let Some(oper) = ret.return_operand.as_ref() {
+                    Some(self.get_temp(data, oper).await)
+                } else {
+                    None
+                };
+                DecodeResult::Return(result)
             }
             Terminator::CondBr(condbr) => {
-                if let Some(stuck) = self.top_mut().ip.stuck.as_ref() {
-                    if let Some(result) = stuck[0].get() {
-                        if result.unwrap_bool() {
-                            self.jump(&condbr.true_dest);
-                        } else {
-                            self.jump(&condbr.false_dest);
-                        }
-                        DecodeResult::Step
-                    } else {
-                        DecodeResult::Stuck
-                    }
+                if self.get_temp(data, &condbr.condition).await.get().await.unwrap_bool() {
+                    DecodeResult::Jump(&condbr.true_dest)
                 } else {
-                    let cond = self.get_temp(&condbr.condition);
-                    self.top_mut().ip.stuck = Some(vec![cond]);
-                    DecodeResult::Step
+                    DecodeResult::Jump(&condbr.false_dest)
                 }
             }
             Terminator::Unreachable(_) => {
                 panic!("Unreachable");
             }
             Terminator::Invoke(invoke) => {
-                let next = &self.top().fun.blocks.get(&invoke.return_label)
-                    .unwrap_or_else(|| panic!("Bad jump target {:?} in {:?}", invoke.return_label, self.top().fun.src));
-                let frame = self.frames.len() - 1;
-                if self.decode_call(memory, &invoke.function, &invoke.arguments, Some(&invoke.result)) {
-                    self.frames[frame].ip = InstrPtr { block: next, index: 0, stuck: None };
-                    DecodeResult::Step
-                } else {
-                    DecodeResult::Step
-                }
+                self.decode_call(data, &invoke.function, &invoke.arguments, Some(&invoke.result)).await;
+                DecodeResult::Jump(&invoke.return_label)
             }
             Terminator::Switch(switch) => {
-                if let Some(stuck) = self.top_mut().ip.stuck.as_ref() {
-                    let val = stuck[0].get().unwrap();
-                    let target =
-                        stuck[1..].iter()
-                            .zip(switch.dests.iter())
-                            .find_map(|(pat, (_, target))| {
-                                let pat = pat.get().unwrap();
-                                (pat == val).then_some(target)
-                            })
-                            .unwrap_or(&switch.default_dest);
-                    self.jump(target);
-                    DecodeResult::Step
-                } else {
-                    let cond = self.get_temp(&switch.operand);
-                    let deps =
-                        iter::once(cond).chain(
-                            switch.dests.iter().map(|(pat, _)|
-                                self.add_thunk(None, Node::Constant(pat), vec![])))
-                            .collect::<Vec<_>>();
-                    self.top_mut().ip.stuck = Some(deps);
-                    DecodeResult::Step
+                let cond = self.get_temp(data, &switch.operand).await;
+                let cond = cond.get().await;
+                let mut target = None;
+                for (pat, dest) in switch.dests.iter() {
+                    let (_, pat) = self.ctx.get_constant(self.fun.ectx, &pat);
+                    if &pat == cond {
+                        target = Some(dest);
+                    }
                 }
+                DecodeResult::Jump(target.unwrap_or(&switch.default_dest))
             }
             term => todo!("{:?}", term)
         }
     }
-    fn get_temp(&mut self, oper: &'ctx Operand) -> Rc<Thunk<'ctx>> {
+    async fn get_temp<'a>(&'a mut self, data: &'a DataFlow<'ctx>, oper: &'ctx Operand) -> Rc<Thunk<'ctx>> {
         match oper {
             Operand::LocalOperand { name, .. } => {
-                self.top().temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
+                self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
             }
             Operand::ConstantOperand(constant) => {
-                self.add_thunk(None, Node::Constant(constant), vec![])
+                let value = self.ctx.get_constant(self.fun.ectx, constant).1;
+                self.add_thunk(data, None, vec![], move |_| value).await
             }
             Operand::MetadataOperand => {
-                self.add_thunk(None, Node::Metadata, vec![])
+                self.add_thunk(data, None, vec![], |_| Value::from(())).await
             }
         }
     }
-    fn decode_call<'a>(&'a mut self,
-                       memory: &'a Memory<'ctx>,
-                       function: &'ctx Either<InlineAssembly, Operand>,
-                       arguments: &'ctx Vec<(Operand, Vec<ParameterAttribute>)>,
-                       dest: Option<&'ctx Name>,
-    ) -> bool {
-        if let Some(fun) = self.top_mut().ip.stuck.as_ref() {
-            let fun = memory.reverse_lookup(fun[0].unwrap());
-            if let Some(native) = self.ctx.native.get(&fun) {
-                let deps =
-                    arguments.iter()
-                        .map(|(arg, _)| { self.get_temp(arg) })
-                        .collect::<Vec<_>>();
-                //println!("{:?}", deps);
-                let result = self.add_thunk(dest, Node::Native(native), deps.clone());
-            } else if let Some(compiled) = self.ctx.functions.get(&fun) {
-                let temps =
-                    compiled.src.parameters.iter().zip(arguments.iter())
-                        .map(|(param, (arg, _))| {
-                            (&param.name, self.get_temp(arg))
-                        }).collect();
-                self.frames.push(Frame {
-                    fun: compiled,
-                    origin: None,
-                    ip: InstrPtr {
-                        block: compiled.src.basic_blocks.first().unwrap(),
-                        index: 0,
-                        stuck: None,
-                    },
-                    temps,
-                    allocs: vec![],
-                    result: dest,
-                });
-            } else {
-                panic!("Unknown function {:?}", fun);
+    async fn decode_call<'a>(&'a mut self,
+                             data: &'a DataFlow<'ctx>,
+                             function: &'ctx Either<InlineAssembly, Operand>,
+                             arguments: &'ctx Vec<(Operand, Vec<ParameterAttribute>)>,
+                             dest: Option<&'ctx Name>,
+    ) {
+        let fun = match function {
+            Either::Left(assembly) => todo!("{:?}", assembly),
+            Either::Right(fun) => fun,
+        };
+        let fun = self.get_temp(data, fun).await;
+        let fun = fun.get().await;
+        let fun = self.ctx.reverse_lookup(fun);
+        if let Some(native) = self.ctx.native.get(&fun) {
+            let mut deps = vec![];
+            for (oper, _) in arguments.iter() {
+                deps.push(self.get_temp(data, oper).await)
             }
-            return true;
+            self.add_thunk(data, dest, deps, move |args| {
+                (native.imp)(args)
+            }).await;
+        } else if let Some(compiled) = self.ctx.functions.get(&fun) {
+            let mut temps = HashMap::new();
+            for (param, (oper, _)) in compiled.src.parameters.iter().zip(arguments.iter()) {
+                temps.insert(&param.name, self.get_temp(data, oper).await);
+            }
+            let result = Frame {
+                ctx: self.ctx,
+                fun: compiled,
+                origin: None,
+                temps,
+                allocs: vec![],
+                result: dest,
+            }.decode(data).await;
+            self.add_thunk(data, dest, result.into_iter().collect(), |args| {
+                args.args.iter().next().cloned().cloned().unwrap_or(Value::from(()))
+            }).await;
         } else {
-            let fun = match function {
-                Either::Left(assembly) => todo!("{:?}", assembly),
-                Either::Right(fun) => fun,
-            };
-            self.top_mut().ip.stuck = Some(vec![self.get_temp(fun)]);
-            return false;
+            panic!("Unknown function {:?}", fun);
         }
     }
-    fn add_thunk(&mut self, dest: Option<&'ctx Name>, node: Node<'ctx>, deps: Vec<Rc<Thunk<'ctx>>>) -> Rc<Thunk<'ctx>> {
-        let seq = self.seq;
-        self.seq += 1;
-        let thunk = Rc::new(Thunk {
-            threadid: self.threadid,
-            seq,
-            deps,
-            node,
-            value: RefCell::new(None),
-            ectx: self.frames.last().map(|f| f.fun.ectx.clone()).unwrap_or(EvalCtx::default()),
-        });
-        self.thunks.insert(seq, thunk.clone());
+    async fn add_thunk<'a>(&'a mut self,
+                           data: &'a DataFlow<'ctx>,
+                           dest: Option<&'ctx Name>,
+                           deps: Vec<Rc<Thunk<'ctx>>>,
+                           compute: impl 'ctx + FnOnce(ComputeArgs<'ctx, '_>) -> Value) -> Rc<Thunk<'ctx>> {
+        let thunk = data.add_thunk(deps, compute).await;
         if let Some(dest) = dest {
-            self.top_mut().temps.insert(dest, thunk.clone());
+            self.temps.insert(dest, thunk.clone());
         }
         thunk
-    }
-}
-
-
-impl<'ctx> Thunk<'ctx> {
-    pub fn unwrap(&self) -> &Value {
-        self.get().unwrap_or_else(|| panic!("Unwrapped incomplete {:?}", self))
-    }
-    pub fn set(&self, value: Value) {
-        *self.value.borrow_mut() = Some(value);
-    }
-    pub fn get(&self) -> Option<&Value> {
-        let r = self.value.borrow();
-        if r.is_some() {
-            Some(Ref::leak(r).as_ref().unwrap())
-        } else {
-            None
-        }
-    }
-}
-
-
-struct DebugFlat<T: Debug>(T);
-
-impl<T: Debug> Debug for DebugFlat<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", &self.0)
-    }
-}
-
-impl<'ctx> Debug for Thread<'ctx> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Stack")
-            .field("frames", &self.frames)
-            .field("thunks", &self.thunks)
-            .finish()
     }
 }
 
@@ -430,73 +491,53 @@ impl<'ctx> Debug for Frame<'ctx> {
                 .collect::<HashMap<_, _>>();
         f.debug_struct("Frame")
             .field("fun", &self.fun.src.name)
-            .field("ip", &self.ip)
+            //.field("ip", &self.ip)
             .field("temps", &temps)
-            .field("origin", &DebugFlat(&self.origin))
+            //.field("origin", &DebugFlat(&self.origin))
             .finish()
     }
 }
 
-impl<'ctx> Debug for InstrPtr<'ctx> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let debug = if let Some(instr) = self.block.instrs.get(self.index) {
-            instr.get_debug_loc()
-        } else {
-            self.block.term.get_debug_loc()
-        };
-        let debug = if let Some(debug) = debug {
-            format!("{}", debug)
-        } else {
-            format!("")
-        };
-        f.debug_struct("InstrPtr")
-            .field("block", &self.block.name)
-            .field("index", &self.index)
-            .field("stuck", &self.stuck)
-            .field("??", &debug)
-            .finish()
-    }
-}
 
-struct DebugNode<'a>(&'a Node<'a>);
+// impl<'ctx> Debug for InstrPtr<'ctx> {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+//         let debug = if let Some(instr) = self.block.instrs.get(self.index) {
+//             instr.get_debug_loc()
+//         } else {
+//             self.block.term.get_debug_loc()
+//         };
+//         let debug = if let Some(debug) = debug {
+//             format!("{}", debug)
+//         } else {
+//             format!("")
+//         };
+//         f.debug_struct("InstrPtr")
+//             .field("block", &self.block.name)
+//             .field("index", &self.index)
+//             .field("stuck", &self.stuck)
+//             .field("??", &debug)
+//             .finish()
+//     }
+// }
 
-impl<'a> Debug for DebugNode<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
+//struct DebugNode<'a>(&'a Node<'a>);
+//
+// impl<'a> Debug for DebugNode<'a> {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+//         write!(f, "{:?}", self.0)
+//     }
+// }
 
-struct DebugDeps<'a>(&'a [Rc<Thunk<'a>>]);
-
-impl<'a> Debug for DebugDeps<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.iter().map(|thunk| thunk.seq)).finish()
-    }
-}
-
-
-impl<'ctx> Debug for Thunk<'ctx> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}_{} = {:?} [{:?}] ({:?})", self.threadid, self.seq, self.get(), self.deps.iter().map(|dep| dep.seq).collect::<Vec<_>>(), self.node)
-        // f.debug_struct("Thunk")
-        //     .field("threadid", &self.threadid)
-        //     .field("seq", &self.seq)
-        //     .field("value", &self.value)
-        //     .field("node", &DebugNode(&self.node))
-        //     .field("deps", &DebugDeps(self.deps.as_slice()))
-        //     .finish()
-    }
-}
-
-impl<'ctx> Debug for Node<'ctx> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Node::Instr(apply) => write!(f, "{}", apply),
-            Node::Constant(constant) => write!(f, "{}", constant),
-            Node::Value(value) => write!(f, "Value{{{:?}}}", value),
-            Node::Metadata => write!(f, "Metadata"),
-            Node::Return(ret, allocs) => write!(f, "Return{{{:?}}}", ret),
-            Node::Native(native) => write!(f, "{:?}", native),
-        }
-    }
-}
+// impl<'ctx> Debug for Node<'ctx> {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+//         // match self {
+//         //     Node::Instr(apply) => write!(f, "{}", apply),
+//         //     Node::Constant(constant) => write!(f, "{}", constant),
+//         //     Node::Value(value) => write!(f, "Value{{{:?}}}", value),
+//         //     Node::Metadata => write!(f, "Metadata"),
+//         //     Node::Return(ret, allocs) => write!(f, "Return{{{:?}}}", ret),
+//         //     Node::Native(native) => write!(f, "{:?}", native),
+//         // }
+//         panic!()
+//     }
+// }

@@ -48,6 +48,10 @@ impl Layout {
     pub fn pad_to_align(&self) -> Self {
         Layout::from_bits(align_to(self.bits, self.bit_align), self.bit_align)
     }
+    pub fn repeat(&self, n: u64) -> Self {
+        assert!(self.bits % 8 == 0);
+        Layout::from_bits(self.bits * n, self.bit_align)
+    }
 }
 
 impl AggrLayout {

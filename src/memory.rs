@@ -27,11 +27,8 @@ pub enum Symbol<'ctx> {
 }
 
 pub struct Memory<'ctx> {
-    ctx: &'ctx Ctx<'ctx>,
     allocs: BTreeMap<u64, Alloc<'ctx>>,
     next: u64,
-    symbols: HashMap<Symbol<'ctx>, Value>,
-    reverse: HashMap<Value, Symbol<'ctx>>,
 }
 
 #[derive(Debug)]
@@ -44,13 +41,10 @@ struct StoreLog {
 const HEAP_GUARD: u64 = 128;
 
 impl<'ctx> Memory<'ctx> {
-    pub fn new(ctx: &'ctx Ctx<'ctx>) -> Self {
+    pub fn new() -> Self {
         Memory {
-            ctx,
             allocs: BTreeMap::new(),
             next: 128,
-            symbols: HashMap::new(),
-            reverse: HashMap::new(),
         }
     }
     pub fn free(&mut self, ptr: &Value) {
@@ -118,36 +112,13 @@ impl<'ctx> Memory<'ctx> {
         //assert!(missing.is_empty());
         Value::from_bytes(&bytes, layout)
     }
-    pub fn add_symbol(&mut self, name: Symbol<'ctx>, layout: Layout) -> Value {
-        let address = self.alloc(layout);
-        //println!("Add symbol {:?} {:?} {:?}", name, layout, address);
-        assert!(self.symbols.insert(name.clone(), address.clone()).is_none());
-        assert!(self.reverse.insert(address.clone(), name).is_none());
-        address
-    }
-    pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
-        self.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
-    }
-    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
-        if let Some(internal) = self.symbols.get(&Symbol::Internal(ectx.module.unwrap(), name)) {
-            internal
-        } else if let Some(external) = self.symbols.get(&Symbol::External(name)) {
-            external
-        } else {
-            panic!("No symbol named {:?}", name)
-        }
-    }
-    pub fn ctx(&self) -> &'ctx Ctx<'ctx> {
-        self.ctx
-    }
 }
 
 impl<'ctx> Debug for Memory<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Memory")
             .field("allocs", &self.allocs)
-            .field("next", &self.next)
-            .field("reverse", &self.reverse).finish()
+            .finish()
     }
 }
 
@@ -169,9 +140,9 @@ impl<'ctx> Process<'ctx> {
         self.memory.alloc(layout)
     }
     pub fn realloc(&mut self, tctx: ThreadCtx, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
-        let new = self.alloc(tctx,new_layout);
-        self.memcpy(tctx,&new, old, new_layout.bytes().min(old_layout.bytes()));
-        self.free(tctx,old);
+        let new = self.alloc(tctx, new_layout);
+        self.memcpy(tctx, &new, old, new_layout.bytes().min(old_layout.bytes()));
+        self.free(tctx, old);
 
         new
     }
@@ -183,8 +154,8 @@ impl<'ctx> Process<'ctx> {
     }
     pub fn memcpy(&mut self, tctx: ThreadCtx, dst: &Value, src: &Value, len: u64) {
         if len > 0 {
-            let value = self.load(tctx,&src, Layout::from_bytes(len, 1), None);
-            self.store(tctx,&dst, &value, None);
+            let value = self.load(tctx, &src, Layout::from_bytes(len, 1), None);
+            self.store(tctx, &dst, &value, None);
         }
     }
 }

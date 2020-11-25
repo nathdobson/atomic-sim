@@ -2,6 +2,7 @@
 #![feature(bool_to_option)]
 #![feature(cell_leak)]
 #![allow(unused_imports)]
+#![deny(unused_must_use)]
 
 use llvm_ir::Module;
 use crate::flow::Thread;
@@ -12,7 +13,7 @@ use rayon::prelude::*;
 use crate::ctx::Ctx;
 use crate::native::NativeFunction;
 use std::panic::AssertUnwindSafe;
-use crate::memory::Symbol;
+use crate::memory::{Symbol, Memory};
 
 
 mod flow;
@@ -25,6 +26,7 @@ mod native;
 mod exec_ctx;
 mod types;
 mod eval;
+mod data_flow;
 
 pub fn main() {
     let mut modules = vec![];
@@ -39,8 +41,9 @@ pub fn main() {
     let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
     let native = NativeFunction::builtins();
     println!("Running");
-    let ctx = Ctx::new(&modules, &native);
-    let mut process = Process::new(&ctx);
+    let mut memory = Memory::new();
+    let ctx = Ctx::new(&modules, &native, &mut memory);
+    let mut process = Process::new(&ctx, memory);
     process.add_thread(Symbol::External("main"));
     println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| { while process.step() {} })));
     println!("{:#?}", process);
