@@ -6,7 +6,7 @@ use llvm_ir::types::NamedStructDef;
 use crate::value::{Value, add_u64_i64};
 use crate::layout::{Layout, AggrLayout};
 use crate::memory::{Memory, Symbol};
-use crate::native::NativeFunction;
+use crate::native::NativeFun;
 
 pub struct SymbolTable<'ctx> {
     forward: HashMap<Symbol<'ctx>, Value>,
@@ -16,7 +16,7 @@ pub struct SymbolTable<'ctx> {
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
     pub functions: HashMap<Symbol<'ctx>, CompiledFunction<'ctx>>,
-    pub native: HashMap<Symbol<'ctx>, &'ctx NativeFunction>,
+    pub native: HashMap<Symbol<'ctx>, &'ctx dyn NativeFun>,
     pub ptr_bits: u64,
     pub page_size: u64,
     symbols: SymbolTable<'ctx>,
@@ -60,7 +60,7 @@ impl<'ctx> SymbolTable<'ctx> {
 }
 
 impl<'ctx> Ctx<'ctx> {
-    pub fn new(modules: &'ctx [Module], native: &'ctx [NativeFunction], memory: &mut Memory<'ctx>) -> Ctx<'ctx> {
+    pub fn new(modules: &'ctx [Module], native: &'ctx [Box<dyn NativeFun>], memory: &mut Memory<'ctx>) -> Ctx<'ctx> {
         let functions =
             modules.iter()
                 .enumerate()
@@ -70,7 +70,7 @@ impl<'ctx> Ctx<'ctx> {
                      CompiledFunction::new(&EvalCtx { module: Some(mi) }, function))
                 })
                 .collect();
-        let native = native.iter().map(|f| (Symbol::External(&f.name), f)).collect();
+        let native = native.iter().map(|f| (Symbol::External(f.name()), &**f)).collect();
 
         let mut ctx = Ctx {
             modules,

@@ -16,7 +16,6 @@ use std::mem::size_of;
 use crate::value::{Value, add_u64_i64};
 use crate::memory::{Memory, Symbol};
 use crate::ctx::{Ctx, CompiledFunction, EvalCtx, ThreadCtx};
-use crate::native::NativeFunction;
 use crate::exec::Process;
 use std::future::Future;
 use std::task::{Context, Poll};
@@ -447,9 +446,10 @@ impl<'ctx> Frame<'ctx> {
             for (oper, _) in arguments.iter() {
                 deps.push(self.get_temp(data, oper).await)
             }
-            self.add_thunk(data, dest, deps, move |args| {
-                (native.imp)(args)
-            }).await;
+            let result = native.call_imp(data, deps).await;
+            if let Some(dest) = dest {
+                self.temps.insert(dest, result);
+            }
         } else if let Some(compiled) = self.ctx.functions.get(&fun) {
             let mut temps = HashMap::new();
             for (param, (oper, _)) in compiled.src.parameters.iter().zip(arguments.iter()) {

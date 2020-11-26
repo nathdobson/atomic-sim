@@ -11,7 +11,6 @@ use std::{fs, panic};
 use std::ffi::OsStr;
 use rayon::prelude::*;
 use crate::ctx::Ctx;
-use crate::native::NativeFunction;
 use std::panic::AssertUnwindSafe;
 use crate::memory::{Symbol, Memory};
 
@@ -39,7 +38,7 @@ pub fn main() {
         }
     }
     let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
-    let native = NativeFunction::builtins();
+    let native = native::builtins();
     println!("Running");
     let mut memory = Memory::new();
     let ctx = Ctx::new(&modules, &native, &mut memory);
