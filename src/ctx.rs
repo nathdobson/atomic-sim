@@ -5,13 +5,10 @@ use std::collections::HashMap;
 use llvm_ir::types::NamedStructDef;
 use crate::value::{Value, add_u64_i64};
 use crate::layout::{Layout, AggrLayout};
-use crate::memory::{Memory, Symbol};
+use crate::memory::{Memory};
 use crate::native::NativeFun;
+use crate::symbols::{SymbolTable, Symbol};
 
-pub struct SymbolTable<'ctx> {
-    forward: HashMap<Symbol<'ctx>, Value>,
-    reverse: HashMap<Value, Symbol<'ctx>>,
-}
 
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
@@ -21,6 +18,7 @@ pub struct Ctx<'ctx> {
     pub page_size: u64,
     symbols: SymbolTable<'ctx>,
 }
+
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EvalCtx {
@@ -49,15 +47,6 @@ impl<'ctx> CompiledFunction<'ctx> {
     }
 }
 
-impl<'ctx> SymbolTable<'ctx> {
-    pub fn add_symbol(&mut self, memory: &mut Memory<'ctx>, name: Symbol<'ctx>, layout: Layout) -> Value {
-        let address = memory.alloc(layout);
-        //println!("Add symbol {:?} {:?} {:?}", name, layout, address);
-        assert!(self.forward.insert(name.clone(), address.clone()).is_none());
-        assert!(self.reverse.insert(address.clone(), name).is_none());
-        address
-    }
-}
 
 impl<'ctx> Ctx<'ctx> {
     pub fn new(modules: &'ctx [Module], native: &'ctx [Box<dyn NativeFun>], memory: &mut Memory<'ctx>) -> Ctx<'ctx> {
@@ -78,10 +67,7 @@ impl<'ctx> Ctx<'ctx> {
             native,
             ptr_bits: 64,
             page_size: 4096,
-            symbols: SymbolTable {
-                forward: HashMap::new(),
-                reverse: HashMap::new(),
-            },
+            symbols: SymbolTable::new(),
         };
         ctx.initialize_globals(memory);
         ctx
@@ -133,46 +119,6 @@ impl<'ctx> Ctx<'ctx> {
         array[..bytes.len()].copy_from_slice(bytes);
         Value::new(bits, u128::from_le_bytes(array))
     }
-    // pub fn from_bytes(&self, bytes: &[u8], to_type: &TypeRef) -> Value {
-    //     match &**to_type {
-    //         Type::IntegerType { bits } => {
-    //             self.int_from_bytes(bytes, *bits as u64)
-    //         }
-    //         Type::PointerType { pointee_type, addr_space } => {
-    //             self.int_from_bytes(bytes, self.ptr_bits)
-    //         }
-    //         Type::ArrayType { element_type, num_elements } => {
-    //             let len = self.layout(element_type).size();
-    //             assert_eq!((len as usize) * *num_elements, bytes.len());
-    //             Value::aggregate(
-    //                 bytes
-    //                     .chunks(len as usize)
-    //                     .map(|b| self.from_bytes(b, element_type)),
-    //                 false)
-    //         }
-    //         Type::StructType { element_types, is_packed } => todo!(),
-    //         _ => todo!("{:?}", to_type),
-    //     }
-    // }
-    // pub fn to_bytes(&self, value: &Value) -> (Layout, Vec<u8>) {
-    //     match value {
-    //         Value::Int { bits, value } => {
-    //             (Layout::of_int(*bits), value.to_le_bytes()[0..(*bits as usize + 7) / 8].to_vec())
-    //         }
-    //         Value::Aggregate { children, is_packed } => {
-    //             let mut result = vec![];
-    //             let mut result_layout = Layout::from_size_align(0, 1);
-    //             for child in children.iter() {
-    //                 let (layout, value) = self.to_bytes(child);
-    //                 let offset = result_layout.offset(*is_packed, layout);
-    //                 result.resize(offset as usize, 0);
-    //                 result.extend_from_slice(&value);
-    //                 result_layout = result_layout.extend(*is_packed, layout);
-    //             }
-    //             (result_layout.pad_to_align(), result)
-    //         }
-    //     }
-    // }
     pub fn layout_of_ptr(&self) -> Layout {
         Layout::from_bits(self.ptr_bits, self.ptr_bits)
     }
@@ -235,18 +181,7 @@ impl<'ctx> Ctx<'ctx> {
         }
     }
 
-    pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
-        self.symbols.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
-    }
-    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
-        if let Some(internal) = self.symbols.forward.get(&Symbol::Internal(ectx.module.unwrap(), name)) {
-            internal
-        } else if let Some(external) = self.symbols.forward.get(&Symbol::External(name)) {
-            external
-        } else {
-            panic!("No symbol named {:?}", name)
-        }
-    }
+
     pub fn get_constant(&self, ectx: EvalCtx, c: &'ctx Constant) -> (TypeRef, Value) {
         match c {
             Constant::Int { bits, value } => {
@@ -356,7 +291,12 @@ impl<'ctx> Ctx<'ctx> {
             ty => todo!("{:?}", ty),
         }
     }
-
+    pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
+        self.symbols.reverse_lookup(address)
+    }
+    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
+        self.symbols.lookup(ectx, name)
+    }
 }
 
 
@@ -378,8 +318,6 @@ impl<'ctx> Debug for Ctx<'ctx> {
             .finish()
     }
 }
-
-impl EvalCtx {}
 
 fn str_of_name(name: &Name) -> &str {
     match name {

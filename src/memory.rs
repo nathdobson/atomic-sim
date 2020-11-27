@@ -9,7 +9,7 @@ use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use llvm_ir::module::Linkage;
-use crate::exec::Process;
+use crate::process::Process;
 
 #[derive(Debug)]
 pub struct Alloc<'ctx> {
@@ -20,11 +20,7 @@ pub struct Alloc<'ctx> {
     freed: bool,
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
-pub enum Symbol<'ctx> {
-    External(&'ctx str),
-    Internal(usize, &'ctx str),
-}
+
 
 pub struct Memory<'ctx> {
     allocs: BTreeMap<u64, Alloc<'ctx>>,
@@ -119,43 +115,5 @@ impl<'ctx> Debug for Memory<'ctx> {
         f.debug_struct("Memory")
             .field("allocs", &self.allocs)
             .finish()
-    }
-}
-
-impl<'ctx> Symbol<'ctx> {
-    pub fn new(linkage: Linkage, module: usize, name: &'ctx str) -> Self {
-        match linkage {
-            Linkage::Private | Linkage::Internal => Symbol::Internal(module, name),
-            Linkage::External => Symbol::External(name),
-            _ => todo!("{:?}", linkage)
-        }
-    }
-}
-
-impl<'ctx> Process<'ctx> {
-    pub fn free(&mut self, tctx: ThreadCtx, ptr: &Value) {
-        self.memory.free(ptr)
-    }
-    pub fn alloc(&mut self, tctx: ThreadCtx, layout: Layout) -> Value {
-        self.memory.alloc(layout)
-    }
-    pub fn realloc(&mut self, tctx: ThreadCtx, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
-        let new = self.alloc(tctx, new_layout);
-        self.memcpy(tctx, &new, old, new_layout.bytes().min(old_layout.bytes()));
-        self.free(tctx, old);
-
-        new
-    }
-    pub fn store(&mut self, tctx: ThreadCtx, ptr: &Value, value: &Value, atomicity: Option<&'ctx Atomicity>) {
-        self.memory.store(ptr, value, atomicity);
-    }
-    pub fn load(&mut self, tctx: ThreadCtx, ptr: &Value, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Value {
-        self.memory.load(ptr, layout, atomicity)
-    }
-    pub fn memcpy(&mut self, tctx: ThreadCtx, dst: &Value, src: &Value, len: u64) {
-        if len > 0 {
-            let value = self.load(tctx, &src, Layout::from_bytes(len, 1), None);
-            self.store(tctx, &dst, &value, None);
-        }
     }
 }

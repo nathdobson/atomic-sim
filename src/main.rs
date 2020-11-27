@@ -5,27 +5,26 @@
 #![deny(unused_must_use)]
 
 use llvm_ir::Module;
-use crate::flow::Thread;
-use crate::exec::Process;
+use crate::thread::Thread;
+use crate::process::Process;
 use std::{fs, panic};
 use std::ffi::OsStr;
 use rayon::prelude::*;
 use crate::ctx::Ctx;
 use std::panic::AssertUnwindSafe;
-use crate::memory::{Symbol, Memory};
+use crate::memory::{Memory};
+use crate::symbols::Symbol;
 
-
-mod flow;
-mod exec;
+mod thread;
+mod process;
 mod layout;
 mod value;
 mod memory;
 mod ctx;
 mod native;
-mod exec_ctx;
-mod types;
-mod eval;
-mod data_flow;
+mod data;
+mod symbols;
+mod frame;
 
 pub fn main() {
     let mut modules = vec![];

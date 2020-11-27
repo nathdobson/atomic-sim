@@ -1,10 +1,10 @@
 use futures::pending;
 use crate::ctx::{ThreadCtx, Ctx};
 use crate::value::Value;
-use crate::exec::Process;
+use crate::process::Process;
 use std::fmt::{Formatter, Debug};
 use std::{fmt, mem};
-use crate::flow::{Thread, Frame};
+use crate::thread::{Thread};
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
 use std::cell::{RefCell, Ref};
@@ -62,26 +62,12 @@ pub struct Thunk<'ctx> {
 
 
 impl<'ctx> Thunk<'ctx> {
-    // pub fn unwrap(&self) -> &Value {
-    //     self.get().unwrap_or_else(|| panic!("Unwrapped incomplete {:?}", self))
-    // }
     pub async fn get(&self) -> &Value {
         loop {
-            let r = self.value.borrow();
-            match &*r {
-                ThunkState::Pending(_) => {
-                    mem::drop(r);
-                    pending!();
-                    continue;
-                }
-                ThunkState::Ready(_) => {}
-                ThunkState::Sandbag => unreachable!()
-            }
-            let r = Ref::leak(r);
-            match r {
-                ThunkState::Pending(_) => unreachable!(),
-                ThunkState::Ready(value) => { return value; }
-                ThunkState::Sandbag => unreachable!()
+            if let Some(v) = self.try_get() {
+                return v;
+            } else {
+                pending!();
             }
         }
     }
@@ -180,8 +166,6 @@ impl<T: Debug> Debug for DebugFlat<T> {
 impl<'ctx> Debug for Thread<'ctx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Stack")
-            //.field("frames", &self.frames)
-            //.field("thunks", &self.thunks)
             .finish()
     }
 }
@@ -199,13 +183,6 @@ impl<'a> Debug for DebugDeps<'a> {
 impl<'ctx> Debug for Thunk<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}_{} = {:?} [{:?}]", self.tctx.threadid, self.seq, self.value.borrow(), self.deps.iter().map(|dep| dep.seq).collect::<Vec<_>>())
-        // f.debug_struct("Thunk")
-        //     .field("threadid", &self.threadid)
-        //     .field("seq", &self.seq)
-        //     .field("value", &self.value)
-        //     .field("node", &DebugNode(&self.node))
-        //     .field("deps", &DebugDeps(self.deps.as_slice()))
-        //     .finish()
     }
 }
 

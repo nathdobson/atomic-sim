@@ -5,10 +5,10 @@ use std::fmt::{Debug, Formatter};
 use std::fmt;
 use crate::layout::Layout;
 use std::iter::repeat;
-use crate::exec::Process;
+use crate::process::Process;
 use std::hint::unreachable_unchecked;
 use std::cmp::Ordering;
-use crate::data_flow::{ComputeArgs, DataFlow, Thunk};
+use crate::data::{ComputeArgs, DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 
@@ -16,14 +16,6 @@ pub trait NativeFun {
     fn name(&self) -> &str;
     fn call_imp<'a, 'ctx: 'a>(&'ctx self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>>;
 }
-
-// impl Debug for NativeFunction {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-//         f.debug_struct("NativeFunction")
-//             .field("name", &self.name)
-//             .finish()
-//     }
-// }
 
 struct NativeComp<F: 'static + for<'ctx, 'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value> {
     name: String,
