@@ -7,13 +7,15 @@
 use llvm_ir::Module;
 use crate::thread::Thread;
 use crate::process::Process;
-use std::{fs, panic};
+use std::{fs, panic, mem};
 use std::ffi::OsStr;
 use rayon::prelude::*;
 use crate::ctx::Ctx;
 use std::panic::AssertUnwindSafe;
 use crate::memory::{Memory};
 use crate::symbols::Symbol;
+use crate::function::Func;
+use std::rc::Rc;
 
 mod thread;
 mod process;
@@ -21,10 +23,12 @@ mod layout;
 mod value;
 mod memory;
 mod ctx;
-mod native;
+mod function;
 mod data;
 mod symbols;
 mod frame;
+mod native;
+mod compile;
 
 pub fn main() {
     let mut modules = vec![];
@@ -37,12 +41,13 @@ pub fn main() {
         }
     }
     let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
+    let modules = &modules;
     let native = native::builtins();
-    println!("Running");
-    let mut memory = Memory::new();
-    let ctx = Ctx::new(&modules, &native, &mut memory);
-    let mut process = Process::new(&ctx, memory);
+    let ctx = Rc::new(Ctx::new(modules, native));
+    let mut process = Process::new(ctx.clone());
     process.add_thread(Symbol::External("main"));
     println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| { while process.step() {} })));
     println!("{:#?}", process);
+    mem::drop(process);
+    mem::drop(ctx);
 }

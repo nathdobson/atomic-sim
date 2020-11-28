@@ -24,7 +24,7 @@ use crate::symbols::Symbol;
 
 
 pub struct Process<'ctx> {
-    pub ctx: &'ctx Ctx<'ctx>,
+    pub ctx: Rc<Ctx<'ctx>>,
     pub threads: BTreeMap<usize, Thread<'ctx>>,
     pub next_threadid: usize,
     pub rng: XorShiftRng,
@@ -33,24 +33,24 @@ pub struct Process<'ctx> {
 
 
 impl<'ctx> Process<'ctx> {
-    pub fn new(ctx: &'ctx Ctx, memory: Memory<'ctx>) -> Self {
+    pub fn new(ctx: Rc<Ctx<'ctx>>) -> Self {
         let mut process = Process {
-            ctx,
+            ctx: ctx.clone(),
             threads: BTreeMap::new(),
             next_threadid: 0,
             rng: XorShiftRng::seed_from_u64(0),
-            memory,
+            memory: ctx.new_memory(),
         };
         process
     }
-    pub fn ctx(&self) -> &'ctx Ctx<'ctx> {
-        self.ctx
+    pub fn ctx(&self) -> &Ctx<'ctx> {
+        &*self.ctx
     }
     pub fn add_thread(&mut self, main: Symbol<'ctx>) {
         let threadid = self.next_threadid;
         self.next_threadid += 1;
         self.threads.insert(threadid,
-                            Thread::new(self.ctx, main, threadid,
+                            Thread::new(self.ctx.clone(), main, threadid,
                                         &[Value::new(32, 0),
                                             Value::new(self.ctx.ptr_bits, 0)]));
     }

@@ -1,35 +1,33 @@
-use crate::memory::Memory;
-use crate::value::Value;
-use crate::ctx::{Ctx, ThreadCtx};
-use std::fmt::{Debug, Formatter};
-use std::fmt;
-use crate::layout::Layout;
-use std::iter::repeat;
-use crate::process::Process;
-use std::hint::unreachable_unchecked;
 use std::cmp::Ordering;
+use crate::layout::Layout;
+use crate::value::Value;
+use crate::function::Func;
 use crate::data::{ComputeArgs, DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
+use std::marker::PhantomData;
 
-pub trait NativeFun {
-    fn name(&self) -> &str;
-    fn call_imp<'a, 'ctx: 'a>(&'ctx self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>>;
+struct NativeComp<'ctx> {
+    name: &'ctx str,
+    phantom: PhantomData<&'ctx ()>,
+    imp: Rc<dyn 'ctx + for<'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value>,
 }
 
-struct NativeComp<F: 'static + for<'ctx, 'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value> {
-    name: String,
-    imp: F,
-}
-
-impl<F: 'static + for<'ctx2, 'comp> Fn(ComputeArgs<'ctx2, 'comp>) -> Value> NativeFun for NativeComp<F> {
-    fn name(&self) -> &str {
-        &self.name
+impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
+    fn name(&self) -> &'ctx str {
+        self.name
     }
 
-    fn call_imp<'a, 'ctx: 'a>(&'ctx self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
-        Box::pin(data.add_thunk(args, &self.imp))
+    fn call_imp<'a>(&'a self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Option<Rc<Thunk<'ctx>>>> {
+        let imp = self.imp.clone();
+        Box::pin(async move {
+            Some(data.add_thunk(args, move |args| imp(args)).await)
+        })
     }
+
+    // fn call_imp<'a>(&'ctx self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
+    //     Box::pin(data.add_thunk(args, &self.imp))
+    // }
 }
 
 macro_rules! overflow_binop {
@@ -49,8 +47,8 @@ macro_rules! overflow_binop {
     };
     ($op:expr, $wrapping:ident, $checked:ident, $ty:expr, $unwrap:ident) => {
         native_comp_new(
-            &format!("llvm.{}.with.overflow.{}", $op, $ty),
-            |args| {
+            &**Box::leak(Box::new(format!("llvm.{}.with.overflow.{}", $op, $ty))),
+            move |args| {
                 let (x, y) = (args.args[0].$unwrap(), args.args[1].$unwrap());
                 Value::aggregate([
                                      Value::from(x.$wrapping(y)),
@@ -61,15 +59,16 @@ macro_rules! overflow_binop {
     }
 }
 
-pub fn native_comp_new(name: &str, imp: impl 'static + for<'ctx, 'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value) -> Box<dyn NativeFun> {
-    Box::new(NativeComp {
-        name: name.to_string(),
-        imp: imp,
+pub fn native_comp_new<'ctx>(name: &'ctx str, imp: impl 'static + for<'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value) -> Rc<dyn 'ctx + Func<'ctx>> {
+    Rc::new(NativeComp {
+        name: name,
+        imp: Rc::new(imp),
+        phantom: Default::default(),
     })
 }
 
-pub fn builtins() -> Vec<Box<dyn NativeFun>> {
-    let mut result: Vec<Box<dyn NativeFun>> = vec![];
+pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
+    let mut result: Vec<Rc<dyn 'ctx + Func<'ctx>>> = vec![];
     result.append(&mut vec![
         native_comp_new("llvm.dbg.declare", |args: ComputeArgs| {
             Value::from(())

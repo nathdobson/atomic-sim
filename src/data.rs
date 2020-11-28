@@ -18,7 +18,10 @@ pub struct DataFlowInner<'ctx> {
     thunks: BTreeMap<usize, Rc<Thunk<'ctx>>>,
 }
 
-pub struct DataFlow<'ctx>(RefCell<DataFlowInner<'ctx>>);
+pub struct DataFlow<'ctx> {
+    ctx: Rc<Ctx<'ctx>>,
+    inner: RefCell<DataFlowInner<'ctx>>,
+}
 
 pub struct ComputeArgs<'ctx, 'comp> {
     pub process: &'comp mut Process<'ctx>,
@@ -111,14 +114,17 @@ impl<'ctx> Thunk<'ctx> {
 }
 
 impl<'ctx> DataFlow<'ctx> {
-    pub fn new(threadid: usize) -> Self {
-        DataFlow(RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }))
+    pub fn new(ctx: Rc<Ctx<'ctx>>, threadid: usize) -> Self {
+        DataFlow {
+            ctx,
+            inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
+        }
     }
     pub async fn add_thunk(&self, deps: Vec<Rc<Thunk<'ctx>>>, compute: impl 'ctx + for<'a> FnOnce(ComputeArgs<'ctx, 'a>) -> Value) -> Rc<Thunk<'ctx>> {
-        while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
+        while self.inner.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
-        let mut this = self.0.borrow_mut();
+        let mut this = self.inner.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
         let thunk: Rc<Thunk<'ctx>> = Rc::new(Thunk {
@@ -134,10 +140,10 @@ impl<'ctx> DataFlow<'ctx> {
         thunk
     }
     pub fn len(&self) -> usize {
-        self.0.borrow().thunks.len()
+        self.inner.borrow().thunks.len()
     }
     pub fn step(&self, tctx: ThreadCtx) -> impl FnOnce(&mut Process<'ctx>) -> bool {
-        let thunk = self.0.borrow_mut().thunks.pop_first();
+        let thunk = self.inner.borrow_mut().thunks.pop_first();
         move |process| {
             if let Some((_, thunk)) = thunk {
                 thunk.step(process, tctx);
@@ -147,11 +153,14 @@ impl<'ctx> DataFlow<'ctx> {
             }
         }
     }
+    pub fn ctx(&self) -> &Rc<Ctx<'ctx>> {
+        &self.ctx
+    }
 }
 
 impl<'ctx, 'comp> ComputeArgs<'ctx, 'comp> {
-    pub fn ctx(&self) -> &'ctx Ctx<'ctx> {
-        self.process.ctx
+    pub fn ctx(&self) -> &Ctx<'ctx> {
+        &*self.process.ctx
     }
 }
 

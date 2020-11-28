@@ -15,7 +15,7 @@ use llvm_ir::function::ParameterAttribute;
 use std::mem::size_of;
 use crate::value::{Value, add_u64_i64};
 use crate::memory::{Memory};
-use crate::ctx::{Ctx, CompiledFunction, EvalCtx, ThreadCtx};
+use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
 use crate::process::Process;
 use std::future::Future;
 use std::task::{Context, Poll};
@@ -36,9 +36,21 @@ pub struct Thread<'ctx> {
 
 
 impl<'ctx> Thread<'ctx> {
-    pub fn new(ctx: &'ctx Ctx<'ctx>, main: Symbol<'ctx>, threadid: usize, params: &[Value]) -> Self {
-        let data = Rc::new(DataFlow::new(threadid));
-        let control = Box::pin(Frame::call(ctx, data.clone(), main, params.to_vec()));
+    pub fn new(ctx: Rc<Ctx<'ctx>>, main: Symbol<'ctx>, threadid: usize, params: &[Value]) -> Self {
+        let data = Rc::new(DataFlow::new(ctx.clone(), threadid));
+        let main = ctx.functions.get(&main).unwrap().clone();
+        let params = params.to_vec();
+        let control = Box::pin({
+            let data = data.clone();
+            async move {
+                let mut deps = vec![];
+                for value in params {
+                    let value = value.clone();
+                    deps.push(data.add_thunk(vec![], |args| { value }).await);
+                }
+                main.call_imp(&*data, deps).await;
+            }
+        });
         Thread { threadid, control, data }
     }
     pub fn step(&mut self) -> impl FnOnce(&mut Process<'ctx>) -> bool {

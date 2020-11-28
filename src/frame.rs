@@ -15,7 +15,7 @@ use llvm_ir::function::ParameterAttribute;
 use std::mem::size_of;
 use crate::value::{Value, add_u64_i64};
 use crate::memory::{Memory};
-use crate::ctx::{Ctx, CompiledFunction, EvalCtx, ThreadCtx};
+use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
 use crate::process::Process;
 use std::future::Future;
 use std::task::{Context, Poll};
@@ -26,14 +26,17 @@ use crate::data::Thunk;
 use futures::future::LocalBoxFuture;
 use futures::task::noop_waker_ref;
 use crate::symbols::Symbol;
+use crate::compile::CompiledFunc;
 
 pub struct Frame<'ctx> {
-    ctx: &'ctx Ctx<'ctx>,
-    fun: &'ctx CompiledFunction<'ctx>,
-    origin: Option<&'ctx Name>,
-    temps: HashMap<&'ctx Name, Rc<Thunk<'ctx>>>,
-    allocs: Vec<Rc<Thunk<'ctx>>>,
-    result: Option<&'ctx Name>,
+    pub ctx: Rc<Ctx<'ctx>>,
+    pub fun: &'ctx Function,
+    pub origin: Option<&'ctx Name>,
+    pub temps: HashMap<&'ctx Name, Rc<Thunk<'ctx>>>,
+    pub allocs: Vec<Rc<Thunk<'ctx>>>,
+    pub result: Option<&'ctx Name>,
+    pub blocks: HashMap<&'ctx Name, &'ctx BasicBlock>,
+    pub ectx: EvalCtx,
 }
 
 enum DecodeResult<'ctx> {
@@ -42,34 +45,61 @@ enum DecodeResult<'ctx> {
 }
 
 impl<'ctx> Frame<'ctx> {
-    pub async fn call(ctx: &'ctx Ctx<'ctx>, data: Rc<DataFlow<'ctx>>, main: Symbol<'ctx>, params: Vec<Value>) {
-        let main = ctx.functions.get(&main).unwrap();
+    pub async fn call(ectx: EvalCtx,
+                      data: &DataFlow<'ctx>,
+                      fun: &'ctx Function,
+                      params: Vec<Rc<Thunk<'ctx>>>) -> Option<Rc<Thunk<'ctx>>> {
+        let temps =
+            fun.parameters.iter()
+                .zip(params.into_iter())
+                .map(|(n, v)| (&n.name, v))
+                .collect();
+        let blocks =
+            fun.basic_blocks.iter()
+                .map(|block| (&block.name, block))
+                .collect();
         let mut frame = Frame {
-            ctx,
-            fun: main,
+            ctx: data.ctx().clone(),
+            fun,
             origin: None,
-            temps: Default::default(),
+            temps,
             allocs: vec![],
             result: None,
+            blocks,
+            ectx,
         };
-        for (name, value) in main.src.parameters.iter().zip(params.into_iter()) {
-            frame.add_thunk(&data,
-                            Some(&name.name),
-                            vec![], |_| value).await;
-        }
-        frame.decode(&*data.clone()).await;
+        frame.decode(&*data.clone()).await
     }
+    // pub async fn call(ctx: Rc<Ctx<'ctx>>, data: Rc<DataFlow<'ctx>>, main: Symbol<'ctx>, params: Vec<Value>) {
+    //     todo!();
+    // let main = ctx.functions.get(&main).unwrap().clone();
+    // let mut frame = Frame {
+    //     ctx,
+    //     fun: main.clone(),
+    //     origin: None,
+    //     temps: Default::default(),
+    //     allocs: vec![],
+    //     result: None,
+    //     blocks: fun.basic_blocks.iter().map(|block| (&block.name, block)).collect(),
+    // };
+    // for (name, value) in main.src.parameters.iter().zip(params.into_iter()) {
+    //     frame.add_thunk(&data,
+    //                     Some(&name.name),
+    //                     vec![], |_| value).await;
+    // }
+    // frame.decode(&*data.clone()).await;
+    // }
     pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>) -> impl Future<Output=Option<Rc<Thunk<'ctx>>>> + 'a {
         async move { self.decode_impl(data).await }.boxed_local()
     }
     pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>) -> Option<Rc<Thunk<'ctx>>> {
-        let mut block = self.fun.src.basic_blocks.get(0).unwrap();
+        let mut block = self.fun.basic_blocks.get(0).unwrap();
         loop {
             for instr in block.instrs.iter() {
                 self.decode_instr(data, instr).await;
             }
             block = match self.decode_term(data, &block.term).await {
-                DecodeResult::Jump(name) => *self.fun.blocks.get(name).unwrap(),
+                DecodeResult::Jump(name) => *self.blocks.get(name).unwrap(),
                 DecodeResult::Return(result) => return result,
             };
         }
@@ -112,7 +142,7 @@ impl<'ctx> Frame<'ctx> {
             }
             Instruction::Load(load) => {
                 let deps = vec![self.get_temp(data, &load.address).await];
-                let layout = self.ctx.layout(&self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, &load.address)));
+                let layout = self.ctx.layout(&self.ctx.target_of(&self.ctx.type_of(self.ectx, &load.address)));
                 self.add_thunk(data, Some(&load.dest), deps, move |args| {
                     args.process.load(args.tctx, args.args[0], layout, load.atomicity.as_ref())
                 }).await;
@@ -133,9 +163,9 @@ impl<'ctx> Frame<'ctx> {
             Instruction::ICmp(ICmp { dest, operand0, operand1, .. })
             => {
                 let deps = vec![self.get_temp(data, operand0).await, self.get_temp(data, operand1).await];
-                let ctx = self.ctx;
+                let ctx = self.ctx.clone();
                 self.add_thunk(data, Some(dest), deps, move |args|
-                    Self::binary(ctx, instr, args.args[0], args.args[1])).await;
+                    Self::binary(&*ctx, instr, args.args[0], args.args[1])).await;
             }
             Instruction::SExt(SExt { dest, operand, .. }) |
             Instruction::ZExt(ZExt { dest, operand, .. }) |
@@ -144,18 +174,18 @@ impl<'ctx> Frame<'ctx> {
             Instruction::IntToPtr(IntToPtr { dest, operand, .. }) |
             Instruction::BitCast(BitCast { dest, operand, .. }) => {
                 let deps = vec![self.get_temp(data, operand).await];
-                let ctx = self.ctx;
+                let ctx = self.ctx.clone();
                 self.add_thunk(data, Some(dest), deps,
-                               move |args| Self::unary(ctx, instr, args.args[0])).await;
+                               move |args| Self::unary(&*ctx, instr, args.args[0])).await;
             }
             Instruction::GetElementPtr(gep) => {
                 let mut deps = vec![self.get_temp(data, &gep.address).await];
                 for ind in gep.indices.iter() {
                     deps.push(self.get_temp(data, ind).await);
                 }
-                let ectx = self.fun.ectx;
-                let ty = self.ctx.type_of(self.fun.ectx, &gep.address);
-                let ctx = self.ctx;
+                let ectx = self.ectx;
+                let ty = self.ctx.type_of(self.ectx, &gep.address);
+                let ctx = self.ctx.clone();
                 self.add_thunk(data, Some(&gep.dest), deps, move |args| {
                     let (_, offset) = ctx.offset_of(&ty,
                                                     args.args[1..].iter().map(|v| v.as_i64()));
@@ -164,7 +194,7 @@ impl<'ctx> Frame<'ctx> {
             }
             Instruction::InsertValue(InsertValue { aggregate, element, dest, indices, .. }) => {
                 let deps = vec![self.get_temp(data, aggregate).await, self.get_temp(data, element).await];
-                let ty = self.ctx.type_of(self.fun.ectx, aggregate);
+                let ty = self.ctx.type_of(self.ectx, aggregate);
                 let (_, offset) = self.ctx.offset_of(&ty, indices.iter().map(|i| *i as i64));
                 let offset = offset as usize;
                 self.add_thunk(data, Some(dest), deps, move |args| {
@@ -177,7 +207,7 @@ impl<'ctx> Frame<'ctx> {
             }
             Instruction::AtomicRMW(AtomicRMW { address, value, dest, operation, atomicity, .. }) => {
                 let deps = vec![self.get_temp(data, address).await, self.get_temp(data, value).await];
-                let ty = self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, address));
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.ectx, address));
                 let layout = self.ctx.layout(&ty);
                 self.add_thunk(data, Some(dest), deps, move |args| {
                     let current = args.process.load(args.tctx, args.args[0], layout, Some(atomicity)).clone();
@@ -209,7 +239,7 @@ impl<'ctx> Frame<'ctx> {
             }
             Instruction::ExtractValue(ExtractValue { aggregate, dest, indices, .. }) => {
                 let deps = vec![self.get_temp(data, aggregate).await];
-                let ty = self.ctx.type_of(self.fun.ectx, aggregate);
+                let ty = self.ctx.type_of(self.ectx, aggregate);
                 let (ty2, offset) = self.ctx.offset_of(&ty, indices.iter().map(|i| *i as i64));
                 let layout = self.ctx.layout(&ty2);
                 let offset = offset as usize;
@@ -223,7 +253,7 @@ impl<'ctx> Frame<'ctx> {
                     vec![self.get_temp(data, address).await,
                          self.get_temp(data, expected).await,
                          self.get_temp(data, replacement).await];
-                let ty = self.ctx.target_of(&self.ctx.type_of(self.fun.ectx, address));
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.ectx, address));
                 let layout = self.ctx.layout(&ty);
                 self.add_thunk(data, Some(dest), deps, move |args| {
                     let (address, expected, replacement) = (args.args[0], args.args[1], args.args[2]);
@@ -241,7 +271,7 @@ impl<'ctx> Frame<'ctx> {
             _ => todo!("{:?}", instr),
         }
     }
-    fn unary(ctx: &'ctx Ctx, instr: &Instruction, value: &Value) -> Value {
+    fn unary(ctx: &Ctx<'ctx>, instr: &Instruction, value: &Value) -> Value {
         match instr {
             Instruction::SExt(SExt { to_type, .. }) =>
                 value.sext(ctx.layout(to_type).bits()),
@@ -261,7 +291,7 @@ impl<'ctx> Frame<'ctx> {
             _ => unreachable!()
         }
     }
-    fn binary(ctx: &'ctx Ctx, instr: &Instruction, x: &Value, y: &Value) -> Value {
+    fn binary(ctx: &Ctx<'ctx>, instr: &Instruction, x: &Value, y: &Value) -> Value {
         match instr {
             Instruction::Add(Add { .. }) => x + y,
             Instruction::Sub(Sub { .. }) => x - y,
@@ -333,7 +363,7 @@ impl<'ctx> Frame<'ctx> {
                 let cond = cond.get().await;
                 let mut target = None;
                 for (pat, dest) in switch.dests.iter() {
-                    let (_, pat) = self.ctx.get_constant(self.fun.ectx, &pat);
+                    let (_, pat) = self.ctx.get_constant(self.ectx, &pat);
                     if &pat == cond {
                         target = Some(dest);
                     }
@@ -349,7 +379,7 @@ impl<'ctx> Frame<'ctx> {
                 self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
             }
             Operand::ConstantOperand(constant) => {
-                let value = self.ctx.get_constant(self.fun.ectx, constant).1;
+                let value = self.ctx.get_constant(self.ectx, constant).1;
                 self.add_thunk(data, None, vec![], move |_| value).await
             }
             Operand::MetadataOperand => {
@@ -370,34 +400,15 @@ impl<'ctx> Frame<'ctx> {
         let fun = self.get_temp(data, fun).await;
         let fun = fun.get().await;
         let fun = self.ctx.reverse_lookup(fun);
-        if let Some(native) = self.ctx.native.get(&fun) {
-            let mut deps = vec![];
-            for (oper, _) in arguments.iter() {
-                deps.push(self.get_temp(data, oper).await)
-            }
-            let result = native.call_imp(data, deps).await;
-            if let Some(dest) = dest {
-                self.temps.insert(dest, result);
-            }
-        } else if let Some(compiled) = self.ctx.functions.get(&fun) {
-            let mut temps = HashMap::new();
-            for (param, (oper, _)) in compiled.src.parameters.iter().zip(arguments.iter()) {
-                temps.insert(&param.name, self.get_temp(data, oper).await);
-            }
-            let result = Frame {
-                ctx: self.ctx,
-                fun: compiled,
-                origin: None,
-                temps,
-                allocs: vec![],
-                result: dest,
-            }.decode(data).await;
-            self.add_thunk(data, dest, result.into_iter().collect(), |args| {
-                args.args.iter().next().cloned().cloned().unwrap_or(Value::from(()))
-            }).await;
-        } else {
-            panic!("Unknown function {:?}", fun);
+        let fun = self.ctx.functions.get(&fun).cloned().unwrap_or_else(|| panic!("Unknown function {:?}", fun));
+        let mut deps = vec![];
+        for (oper, _) in arguments.iter() {
+            deps.push(self.get_temp(data, oper).await)
         }
+        let result = fun.call_imp(data, deps).await;
+        self.add_thunk(data, dest, result.into_iter().collect(), |args| {
+            args.args.get(0).cloned().cloned().unwrap_or(Value::from(()))
+        }).await;
     }
     async fn add_thunk<'a>(&'a mut self,
                            data: &'a DataFlow<'ctx>,
@@ -419,7 +430,7 @@ impl<'ctx> Debug for Frame<'ctx> {
                 .map(|(k, v)| (format!("{}", k), v))
                 .collect::<HashMap<_, _>>();
         f.debug_struct("Frame")
-            .field("fun", &self.fun.src.name)
+            .field("fun", &self.fun.name)
             .field("temps", &temps)
             .finish()
     }

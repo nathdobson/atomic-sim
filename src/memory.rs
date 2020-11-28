@@ -11,7 +11,7 @@ use std::fmt;
 use llvm_ir::module::Linkage;
 use crate::process::Process;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Alloc<'ctx> {
     ptr: u64,
     len: u64,
@@ -20,14 +20,13 @@ pub struct Alloc<'ctx> {
     freed: bool,
 }
 
-
-
+#[derive(Clone)]
 pub struct Memory<'ctx> {
     allocs: BTreeMap<u64, Alloc<'ctx>>,
     next: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StoreLog {
     pos: u64,
     len: u64,
