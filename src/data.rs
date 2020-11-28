@@ -89,7 +89,7 @@ impl<'ctx> Thunk<'ctx> {
         }
     }
     pub fn step(&self, process: &mut Process<'ctx>, tctx: ThreadCtx) -> bool {
-        let mut args = self.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
+        let args = self.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
         match &*self.value.borrow() {
             ThunkState::Ready(_) => panic!("Already ready"),
             ThunkState::Pending(_) => {}

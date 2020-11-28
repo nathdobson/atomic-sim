@@ -1,34 +1,35 @@
-use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type, HasDebugLoc, IntPredicate};
-use llvm_ir::instruction::{Call, InlineAssembly, Phi, Alloca, Store, Load, Xor, SExt, BitCast, InsertValue, ZExt, AtomicRMW, Trunc, Select, PtrToInt, Sub, Or, And, IntToPtr, UDiv, SDiv, URem, SRem, Shl, LShr, AShr, ExtractValue, Mul, CmpXchg, Fence, MemoryOrdering, RMWBinOp};
-use std::collections::{HashMap, BTreeMap};
+use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand};
+use std::collections::HashMap;
+use crate::ctx::{EvalCtx, Ctx};
+use crate::function::Func;
+use crate::data::{DataFlow, Thunk, ComputeArgs};
 use std::rc::Rc;
-use std::fmt::{Debug, Formatter, Display};
-use std::{fmt, iter, mem, ops};
-use std::borrow::BorrowMut;
-use either::Either;
-use std::cell::{Cell, RefCell, Ref};
-use llvm_ir::instruction::Add;
-use llvm_ir::instruction::ICmp;
-use llvm_ir::constant::Constant::Undef;
-use llvm_ir::types::NamedStructDef;
-use llvm_ir::function::ParameterAttribute;
-use std::mem::size_of;
-use crate::value::{Value, add_u64_i64};
-use crate::memory::{Memory};
-use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
-use crate::process::Process;
-use std::future::Future;
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use crate::data::{DataFlow, ComputeArgs};
-use futures::{pending, FutureExt};
-use crate::data::Thunk;
 use futures::future::LocalBoxFuture;
-use futures::task::noop_waker_ref;
-use crate::symbols::Symbol;
-use crate::compile::CompiledFunc;
+use llvm_ir::instruction::{RMWBinOp, Sub, Mul, UDiv, SDiv, URem, SRem, Add, And, Or, Shl, LShr, AShr, ICmp, Xor, SExt, ZExt, Trunc, PtrToInt, IntToPtr, BitCast, InsertValue, AtomicRMW, Select, ExtractValue, CmpXchg, Fence, InlineAssembly};
+use either::Either;
+use std::fmt;
+use futures::{Future, FutureExt};
+use crate::value::{Value, add_u64_i64};
+use llvm_ir::function::ParameterAttribute;
+use std::fmt::Debug;
 
-pub struct Frame<'ctx> {
+#[derive(Debug)]
+pub struct InterpFunc<'ctx> {
+    pub src: &'ctx Function,
+    pub ectx: EvalCtx,
+}
+
+impl<'ctx> InterpFunc<'ctx> {
+    pub fn new(ectx: EvalCtx, fun: &'ctx Function) -> Self {
+        InterpFunc {
+            src: &fun,
+            ectx: ectx,
+        }
+    }
+}
+
+
+struct InterpFrame<'ctx> {
     pub ctx: Rc<Ctx<'ctx>>,
     pub fun: &'ctx Function,
     pub origin: Option<&'ctx Name>,
@@ -44,7 +45,17 @@ enum DecodeResult<'ctx> {
     Return(Option<Rc<Thunk<'ctx>>>),
 }
 
-impl<'ctx> Frame<'ctx> {
+impl<'ctx> Func<'ctx> for InterpFunc<'ctx> {
+    fn name(&self) -> &'ctx str {
+        self.src.name.as_str()
+    }
+
+    fn call_imp<'a>(&'a self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Option<Rc<Thunk<'ctx>>>> {
+        Box::pin(InterpFrame::call(self.ectx, data, self.src, args))
+    }
+}
+
+impl<'ctx> InterpFrame<'ctx> {
     pub async fn call(ectx: EvalCtx,
                       data: &DataFlow<'ctx>,
                       fun: &'ctx Function,
@@ -58,7 +69,7 @@ impl<'ctx> Frame<'ctx> {
             fun.basic_blocks.iter()
                 .map(|block| (&block.name, block))
                 .collect();
-        let mut frame = Frame {
+        let mut frame = InterpFrame {
             ctx: data.ctx().clone(),
             fun,
             origin: None,
@@ -70,27 +81,8 @@ impl<'ctx> Frame<'ctx> {
         };
         frame.decode(&*data.clone()).await
     }
-    // pub async fn call(ctx: Rc<Ctx<'ctx>>, data: Rc<DataFlow<'ctx>>, main: Symbol<'ctx>, params: Vec<Value>) {
-    //     todo!();
-    // let main = ctx.functions.get(&main).unwrap().clone();
-    // let mut frame = Frame {
-    //     ctx,
-    //     fun: main.clone(),
-    //     origin: None,
-    //     temps: Default::default(),
-    //     allocs: vec![],
-    //     result: None,
-    //     blocks: fun.basic_blocks.iter().map(|block| (&block.name, block)).collect(),
-    // };
-    // for (name, value) in main.src.parameters.iter().zip(params.into_iter()) {
-    //     frame.add_thunk(&data,
-    //                     Some(&name.name),
-    //                     vec![], |_| value).await;
-    // }
-    // frame.decode(&*data.clone()).await;
-    // }
     pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>) -> impl Future<Output=Option<Rc<Thunk<'ctx>>>> + 'a {
-        async move { self.decode_impl(data).await }.boxed_local()
+        Box::pin(async move { self.decode_impl(data).await })
     }
     pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>) -> Option<Rc<Thunk<'ctx>>> {
         let mut block = self.fun.basic_blocks.get(0).unwrap();
@@ -322,7 +314,6 @@ impl<'ctx> Frame<'ctx> {
             IntPredicate::SGE => x.as_i128() >= y.as_i128(),
             IntPredicate::SLT => x.as_i128() < y.as_i128(),
             IntPredicate::SLE => x.as_i128() <= y.as_i128(),
-            pred => todo!("{:?}", pred),
         }
     }
     async fn decode_term<'a>(&'a mut self, data: &'a DataFlow<'ctx>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
@@ -423,7 +414,7 @@ impl<'ctx> Frame<'ctx> {
     }
 }
 
-impl<'ctx> Debug for Frame<'ctx> {
+impl<'ctx> Debug for InterpFrame<'ctx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let temps =
             self.temps.iter()

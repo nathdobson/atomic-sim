@@ -25,7 +25,6 @@ use futures::{pending, FutureExt};
 use crate::data::Thunk;
 use futures::future::LocalBoxFuture;
 use futures::task::noop_waker_ref;
-use crate::frame::Frame;
 use crate::symbols::Symbol;
 
 pub struct Thread<'ctx> {
@@ -46,7 +45,7 @@ impl<'ctx> Thread<'ctx> {
                 let mut deps = vec![];
                 for value in params {
                     let value = value.clone();
-                    deps.push(data.add_thunk(vec![], |args| { value }).await);
+                    deps.push(data.add_thunk(vec![], |_| { value }).await);
                 }
                 main.call_imp(&*data, deps).await;
             }
@@ -55,7 +54,7 @@ impl<'ctx> Thread<'ctx> {
     }
     pub fn step(&mut self) -> impl FnOnce(&mut Process<'ctx>) -> bool {
         let step_control = self.control.as_mut().poll(&mut Context::from_waker(noop_waker_ref())).is_pending();
-        let cont = (self.data.step(ThreadCtx { threadid: self.threadid }));
+        let cont = self.data.step(ThreadCtx { threadid: self.threadid });
         move |process| {
             let step_data = cont(process);
             step_control || step_data

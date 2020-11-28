@@ -34,17 +34,13 @@ pub struct Process<'ctx> {
 
 impl<'ctx> Process<'ctx> {
     pub fn new(ctx: Rc<Ctx<'ctx>>) -> Self {
-        let mut process = Process {
+        Process {
             ctx: ctx.clone(),
             threads: BTreeMap::new(),
             next_threadid: 0,
             rng: XorShiftRng::seed_from_u64(0),
             memory: ctx.new_memory(),
-        };
-        process
-    }
-    pub fn ctx(&self) -> &Ctx<'ctx> {
-        &*self.ctx
+        }
     }
     pub fn add_thread(&mut self, main: Symbol<'ctx>) {
         let threadid = self.next_threadid;

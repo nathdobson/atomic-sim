@@ -271,7 +271,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             let str = String::from_utf8(cstr).unwrap();
             match str.as_str() {
                 "RUST_BACKTRACE" => {
-                    let mut cstr = b"full\0";
+                    let cstr = b"full\0";
                     let layout = Layout::from_bytes(cstr.len() as u64, 1);
                     let res = args.process.alloc(args.tctx, layout);
                     args.process.store(args.tctx, &res, &Value::from_bytes(cstr, layout), None);

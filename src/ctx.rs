@@ -8,20 +8,18 @@ use crate::layout::{Layout, AggrLayout};
 use crate::memory::{Memory};
 use crate::function::Func;
 use crate::symbols::{SymbolTable, Symbol};
-use crate::compile::CompiledFunc;
+use crate::interp::InterpFunc;
 use crate::process::Process;
 use std::rc::Rc;
 
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
-    //pub functions: HashMap<Symbol<'ctx>, Rc<CompiledFunc<'ctx>>>,
     pub functions: HashMap<Symbol<'ctx>, Rc<dyn 'ctx + Func<'ctx>>>,
     pub ptr_bits: u64,
     pub page_size: u64,
     symbols: SymbolTable<'ctx>,
     image: Memory<'ctx>,
 }
-
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EvalCtx {
@@ -41,7 +39,7 @@ impl<'ctx> Ctx<'ctx> {
             let ectx = EvalCtx { module: Some(mi) };
             for function in module.functions.iter() {
                 let symbol = Symbol::new(function.linkage, mi, &function.name);
-                let compiled = Rc::new(CompiledFunc::new(ectx, function));
+                let compiled = Rc::new(InterpFunc::new(ectx, function));
                 functions.insert(symbol, compiled);
             }
         }
@@ -99,12 +97,6 @@ impl<'ctx> Ctx<'ctx> {
             }
             _ => todo!("{:?}", ty)
         }
-    }
-    pub fn int_from_bytes(&self, bytes: &[u8], bits: u64) -> Value {
-        assert_eq!(((bits + 7) / 8) as usize, bytes.len());
-        let mut array = [0u8; 16];
-        array[..bytes.len()].copy_from_slice(bytes);
-        Value::new(bits, u128::from_le_bytes(array))
     }
     pub fn layout_of_ptr(&self) -> Layout {
         Layout::from_bits(self.ptr_bits, self.ptr_bits)

@@ -79,9 +79,6 @@ impl<'ctx> Memory<'ctx> {
             }
         );
     }
-    fn intersects(r1: Range<u64>, r2: Range<u64>) -> bool {
-        r1.contains(&r2.start) || r2.contains(&r1.start)
-    }
     pub fn load(&mut self, ptr: &Value, layout: Layout, _atomicity: Option<&'ctx Atomicity>) -> Value {
         let mut bytes = vec![0u8; layout.bytes() as usize];
         let mut missing = (0..layout.bytes()).collect::<HashSet<_>>();

@@ -1,7 +1,7 @@
 #![feature(map_first_last)]
 #![feature(bool_to_option)]
 #![feature(cell_leak)]
-#![allow(unused_imports)]
+#![allow(unused_imports, unused_variables)]
 #![deny(unused_must_use)]
 
 use llvm_ir::Module;
@@ -26,9 +26,8 @@ mod ctx;
 mod function;
 mod data;
 mod symbols;
-mod frame;
 mod native;
-mod compile;
+mod interp;
 
 pub fn main() {
     let mut modules = vec![];
