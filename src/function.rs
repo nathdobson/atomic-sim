@@ -1,6 +1,6 @@
 use crate::memory::Memory;
 use crate::value::Value;
-use crate::ctx::{Ctx, ThreadCtx};
+use crate::ctx::{Ctx};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use crate::layout::Layout;
@@ -8,7 +8,7 @@ use std::iter::repeat;
 use crate::process::Process;
 use std::hint::unreachable_unchecked;
 use std::cmp::Ordering;
-use crate::data::{ComputeArgs, DataFlow, Thunk};
+use crate::data::{DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use crate::backtrace::Backtrace;

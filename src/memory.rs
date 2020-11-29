@@ -5,7 +5,7 @@ use llvm_ir::{Name, TypeRef};
 use crate::layout::{Layout, align_to};
 use llvm_ir::instruction::Atomicity;
 use std::ops::Range;
-use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
+use crate::ctx::{Ctx, EvalCtx};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use llvm_ir::module::Linkage;

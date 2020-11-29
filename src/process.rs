@@ -1,4 +1,4 @@
-use crate::thread::{Thread};
+use crate::thread::{Thread, ThreadId};
 
 use rand_xorshift::XorShiftRng;
 use rand::SeedableRng;
@@ -18,14 +18,14 @@ use std::borrow::Cow;
 use crate::value::{Value, add_u64_i64};
 use crate::memory::Memory;
 use std::convert::TryInto;
-use crate::ctx::{Ctx, EvalCtx, ThreadCtx};
+use crate::ctx::{Ctx, EvalCtx};
 use std::panic::UnwindSafe;
 use crate::symbols::Symbol;
 
 
 pub struct Process<'ctx> {
     pub ctx: Rc<Ctx<'ctx>>,
-    pub threads: BTreeMap<usize, Thread<'ctx>>,
+    pub threads: BTreeMap<ThreadId, Thread<'ctx>>,
     pub next_threadid: usize,
     pub rng: XorShiftRng,
     pub memory: Memory<'ctx>,
@@ -43,7 +43,7 @@ impl<'ctx> Process<'ctx> {
         }
     }
     pub fn add_thread(&mut self, main: Symbol<'ctx>) {
-        let threadid = self.next_threadid;
+        let threadid = ThreadId(self.next_threadid);
         self.next_threadid += 1;
         self.threads.insert(threadid,
                             Thread::new(self.ctx.clone(), main, threadid,
@@ -61,29 +61,29 @@ impl<'ctx> Process<'ctx> {
         }
         true
     }
-    pub fn free(&mut self, tctx: ThreadCtx, ptr: &Value) {
+    pub fn free(&mut self, tid: ThreadId, ptr: &Value) {
         self.memory.free(ptr)
     }
-    pub fn alloc(&mut self, tctx: ThreadCtx, layout: Layout) -> Value {
+    pub fn alloc(&mut self, tid: ThreadId, layout: Layout) -> Value {
         self.memory.alloc(layout)
     }
-    pub fn realloc(&mut self, tctx: ThreadCtx, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
-        let new = self.alloc(tctx, new_layout);
-        self.memcpy(tctx, &new, old, new_layout.bytes().min(old_layout.bytes()));
-        self.free(tctx, old);
+    pub fn realloc(&mut self, tid: ThreadId, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
+        let new = self.alloc(tid, new_layout);
+        self.memcpy(tid, &new, old, new_layout.bytes().min(old_layout.bytes()));
+        self.free(tid, old);
 
         new
     }
-    pub fn store(&mut self, tctx: ThreadCtx, ptr: &Value, value: &Value, atomicity: Option<&'ctx Atomicity>) {
+    pub fn store(&mut self, thread: ThreadId, ptr: &Value, value: &Value, atomicity: Option<&'ctx Atomicity>) {
         self.memory.store(ptr, value, atomicity);
     }
-    pub fn load(&mut self, tctx: ThreadCtx, ptr: &Value, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Value {
+    pub fn load(&mut self, tid: ThreadId, ptr: &Value, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Value {
         self.memory.load(ptr, layout, atomicity)
     }
-    pub fn memcpy(&mut self, tctx: ThreadCtx, dst: &Value, src: &Value, len: u64) {
+    pub fn memcpy(&mut self, tid: ThreadId, dst: &Value, src: &Value, len: u64) {
         if len > 0 {
-            let value = self.load(tctx, &src, Layout::from_bytes(len, 1), None);
-            self.store(tctx, &dst, &value, None);
+            let value = self.load(tid, &src, Layout::from_bytes(len, 1), None);
+            self.store(tid, &dst, &value, None);
         }
     }
     pub fn debug_info(&self, ptr: &Value) -> String {

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use crate::layout::Layout;
 use crate::value::Value;
 use crate::function::{Func};
-use crate::data::{ComputeArgs, DataFlow, Thunk};
+use crate::data::{DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use std::marker::PhantomData;
@@ -10,10 +10,11 @@ use futures::FutureExt;
 use crate::backtrace::BacktraceFrame;
 use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
+use crate::compute::ComputeCtx;
 
 struct NativeComp<'ctx> {
     name: &'ctx str,
-    imp: Rc<dyn 'ctx + for<'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value>,
+    imp: Rc<dyn 'ctx + for<'comp> Fn(ComputeCtx<'ctx, 'comp>, &'comp [&'comp Value]) -> Value>,
 }
 
 struct NativeExec<'ctx> {
@@ -28,7 +29,10 @@ impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
 
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
         let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(args.to_vec(), move |args| imp(args)))
+        Box::pin(flow.data().thunk(args.to_vec(),
+                                   move |comp: ComputeCtx<'ctx, '_>, args| {
+                                       imp(comp, args)
+                                   }))
     }
 }
 
@@ -65,8 +69,8 @@ macro_rules! overflow_binop {
     ($op:expr, $wrapping:ident, $checked:ident, $ty:expr, $unwrap:ident) => {
         native_comp_new(
             &**Box::leak(Box::new(format!("llvm.{}.with.overflow.{}", $op, $ty))),
-            move |args| {
-                let (x, y) = (args.args[0].$unwrap(), args.args[1].$unwrap());
+            move |comp, [x,y]| {
+                let (x, y) = (x.$unwrap(), y.$unwrap());
                 Value::aggregate([
                                      Value::from(x.$wrapping(y)),
                                      Value::from(x.$checked(y).is_none())
@@ -76,13 +80,21 @@ macro_rules! overflow_binop {
     }
 }
 
-pub fn native_comp_new<'ctx>(
+pub fn native_comp_new<'ctx, const N: usize>(
     name: &'ctx str,
-    imp: impl 'static + for<'comp> Fn(ComputeArgs<'ctx, 'comp>) -> Value)
-    -> Rc<dyn 'ctx + Func<'ctx>> {
+    imp: impl 'static + for<'comp> Fn(ComputeCtx<'ctx, 'comp>, [Value; N]) -> Value)
+    -> Rc<dyn 'ctx + Func<'ctx>>
+    where [Value; N]: Default {
     Rc::new(NativeComp {
         name: name,
-        imp: Rc::new(imp),
+        imp: Rc::new(move |comp, args| {
+            assert_eq!(args.len(), N, "{:?}", name);
+            let mut array = <[Value; N]>::default();
+            for (p, a) in array.iter_mut().zip(args.iter()) {
+                *p = (*a).clone();
+            }
+            imp(comp, array)
+        }),
     })
 }
 
@@ -111,190 +123,186 @@ pub fn native_exec_new<'ctx, const N: usize, F>(
 pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
     let mut result: Vec<Rc<dyn 'ctx + Func<'ctx>>> = vec![];
     result.append(&mut vec![
-        native_comp_new("llvm.dbg.declare", |args: ComputeArgs| {
+        native_comp_new("llvm.dbg.declare", |comp, [_, _, _]| {
             Value::from(())
         }),
-        native_comp_new("signal", |args| {
-            Value::new(args.ctx().ptr_bits, 0)
+        native_comp_new("signal", |comp, [_, _]| {
+            Value::new(comp.ctx().ptr_bits, 0)
         }),
-        native_comp_new("sysconf", |args| {
-            Value::from(match args.args[0].unwrap_u32() {
+        native_comp_new("sysconf", |comp, [flag]| {
+            Value::from(match flag.unwrap_u32() {
                 29 => unsafe { libc::sysconf(libc::_SC_PAGESIZE) },
                 x => todo!("{:?}", x),
             } as u64)
         }),
-        native_comp_new("pthread_rwlock_rdlock", |args| {
+        native_comp_new("pthread_rwlock_rdlock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_rwlock_unlock", |args| {
+        native_comp_new("pthread_rwlock_unlock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_lock", |args| {
+        native_comp_new("pthread_mutex_lock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_unlock", |args| {
+        native_comp_new("pthread_mutex_unlock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_unlock", |args| {
+        native_comp_new("pthread_mutex_unlock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutexattr_init", |args| {
+        native_comp_new("pthread_mutexattr_init", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutexattr_settype", |args| {
+        native_comp_new("pthread_mutexattr_settype", |comp, [_, _]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_init", |args| {
+        native_comp_new("pthread_mutex_init", |comp, [_, _]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutexattr_destroy", |args| {
+        native_comp_new("pthread_mutexattr_destroy", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_destroy", |args| {
+        native_comp_new("pthread_mutex_destroy", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_self", |args| {
-            args.ctx().value_from_address(0)
+        native_comp_new("pthread_self", |comp, []| {
+            comp.ctx().value_from_address(0)
         }),
-        native_comp_new("pthread_get_stackaddr_np", |args| {
-            args.ctx().value_from_address(0)
+        native_comp_new("pthread_get_stackaddr_np", |comp, [_]| {
+            comp.ctx().value_from_address(0)
         }),
-        native_comp_new("pthread_get_stacksize_np", |args| {
-            args.ctx().value_from_address(0)
+        native_comp_new("pthread_get_stacksize_np", |comp, [_]| {
+            comp.ctx().value_from_address(0)
         }),
-        native_comp_new("pthread_attr_init", |args| {
+        native_comp_new("pthread_attr_init", |comp, [attr]| {
             let value = [0xFFu8; 64];
-            args.process.store(args.tctx, args.args[0], &Value::from_bytes(&value, Layout::from_bytes(value.len() as u64, 1)), None);
+            comp.process.store(comp.threadid, &attr, &Value::from_bytes(&value, Layout::from_bytes(value.len() as u64, 1)), None);
             Value::from(0u32)
         }),
-        native_comp_new("pthread_attr_setstacksize", |args| {
+        native_comp_new("pthread_attr_setstacksize", |comp, [attr, stacksize]| {
             Value::from(0u32)
         }),
-        native_comp_new("pthread_create", |args| {
+        native_comp_new("pthread_create", |comp, [thread, attr, start_routine, arg]| {
             Value::from(0u32)
         }),
-        native_comp_new("pthread_attr_destroy", |args| {
+        native_comp_new("pthread_attr_destroy", |comp, [attr]| {
             Value::from(0u32)
         }),
-        native_comp_new("pthread_join", |args| {
+        native_comp_new("pthread_join", |comp, [_, _]| {
             Value::from(0u32)
         }),
-        native_comp_new("_tlv_atexit", |args| {
+        native_comp_new("_tlv_atexit", |comp, [func, objAddr]| {
             //TODO synchronize lock
             Value::from(())
         }),
-        native_comp_new("llvm.expect.i1", |args| {
-            args.args[0].clone()
+        native_comp_new("llvm.expect.i1", |comp, [arg, _]| {
+            arg
         }),
-        native_comp_new("llvm.cttz.i64", |args| {
-            Value::from(args.args[0].as_u64().trailing_zeros() as u64)
+        native_comp_new("llvm.cttz.i64", |comp, [arg,_]| {
+            Value::from(arg.as_u64().trailing_zeros() as u64)
         }),
-        native_comp_new("llvm.memcpy.p0i8.p0i8.i64", |args| {
-            args.process.memcpy(args.tctx, args.args[0], args.args[1], args.args[2].as_u64());
+        native_comp_new("llvm.memcpy.p0i8.p0i8.i64", |comp, [dst, src, cnt, _]| {
+            comp.process.memcpy(comp.threadid, &dst, &src, cnt.as_u64());
             Value::from(())
         }),
-        native_comp_new("llvm.ctpop.i64", |args| {
-            Value::from(args.args[0].unwrap_u64().count_ones() as u64)
+        native_comp_new("llvm.ctpop.i64", |comp, [arg]| {
+            Value::from(arg.unwrap_u64().count_ones() as u64)
         }),
-        native_comp_new("llvm.assume", |args| {
-            assert!(args.args[0].unwrap_bool());
+        native_comp_new("llvm.assume", |comp, [arg]| {
+            assert!(arg.unwrap_bool());
             Value::from(())
         }),
-        native_comp_new("write", |args| {
-            let (fd, buf, len) = (args.args[0], args.args[1], args.args[2].as_u64());
-            let value = if len > 0 {
-                args.process.load(args.tctx, &buf, Layout::from_bytes(len, 1), None)
+        native_comp_new("write", |comp, [fd, buf, len]| {
+            let value = if len.as_u64() > 0 {
+                comp.process.load(comp.threadid, &buf, Layout::from_bytes(len.as_u64(), 1), None)
             } else {
                 Value::from(())
             };
             let value = value.bytes();
             let string = String::from_utf8(value.to_vec()).unwrap();
             print!("{}", string);
-            args.ctx().value_from_address(len)
+            len
         }),
-        native_comp_new("llvm.trap", |args| {
+        native_comp_new("llvm.trap", |comp, []| {
             panic!("It's a trap!");
         }),
-        native_comp_new("mmap", |args| {
-            let (addr, length, prot, flags, fd, offset) =
-                (args.args[0].as_u64(),
-                 args.args[1].as_u64(),
-                 args.args[2].unwrap_u32(),
-                 args.args[3].unwrap_u32(),
-                 args.args[4].unwrap_u32(),
-                 args.args[5].as_u64());
-            //memory.alloc(Layout::from_size_align(length,ctx.page_size))
-            args.ctx().value_from_address(addr)
+        native_comp_new("mmap", |comp, [addr, length, prot, flags, fd, offset]| {
+            let addr = addr.as_u64();
+            let length = length.as_u64();
+            let prot = prot.unwrap_u32();
+            let flags = flags.unwrap_u32();
+            let fd = fd.unwrap_u32();
+            let offset = offset.as_u64();
+            println!("mmap {:?}", addr);
+            comp.ctx().value_from_address(addr)
         }),
-        native_comp_new("mprotect", |args| {
-            let (addr, length, prot) =
-                (args.args[0].as_u64(),
-                 args.args[1].as_u64(),
-                 args.args[2].unwrap_u32());
+        native_comp_new("mprotect", |comp, [addr, length, prot]| {
+            let addr = addr.as_u64();
+            let length = length.as_u64();
+            let prot = prot.unwrap_u32();
             Value::from(0u32)
         }),
-        native_comp_new("llvm.memset.p0i8.i64", |args| {
-            let (addr, val, len) = (args.args[0], args.args[1], args.args[2].unwrap_u64());
-            args.process.store(args.tctx, addr,
-                               &Value::from_bytes(&vec![val.unwrap_u8(); len as usize],
-                                                  Layout::from_bytes(len, 1)),
+        native_comp_new("llvm.memset.p0i8.i64", |comp, [addr, val, len, _]| {
+            comp.process.store(comp.threadid, &addr,
+                               &Value::from_bytes(&vec![val.unwrap_u8(); len.as_u64() as usize],
+                                                  Layout::from_bytes(len.as_u64(), 1)),
                                None);
             Value::from(())
         }),
-        native_comp_new("sigaction", |args| {
+        native_comp_new("sigaction", |comp, [signum, act, oldact]| {
             Value::from(0u32)
         }),
-        native_comp_new("sigaltstack", |args| {
+        native_comp_new("sigaltstack", |comp, [ss, old_ss]| {
             Value::from(0u32)
         }),
-        native_comp_new("__rust_alloc", |args| {
-            args.process.alloc(args.tctx, Layout::from_bytes(args.args[0].as_u64(), args.args[1].as_u64()))
+        native_comp_new("__rust_alloc", |comp, [len, align]| {
+            comp.process.alloc(comp.threadid, Layout::from_bytes(len.as_u64(), align.as_u64()))
         }),
-        native_comp_new("__rust_realloc", |args| {
-            args.process.realloc(args.tctx, args.args[0],
-                                 Layout::from_bytes(args.args[1].as_u64(), args.args[2].as_u64()),
-                                 Layout::from_bytes(args.args[3].as_u64(), args.args[2].as_u64()))
+        native_comp_new("__rust_realloc", |comp, [ptr, old_size, align, new_size]| {
+            comp.process.realloc(comp.threadid, &ptr,
+                                 Layout::from_bytes(old_size.as_u64(), align.as_u64()),
+                                 Layout::from_bytes(new_size.as_u64(), align.as_u64()))
         }),
-        native_comp_new("__rust_dealloc", |args| {
-            args.process.free(args.tctx, args.args[0]);
+        native_comp_new("__rust_dealloc", |comp, [ptr, size, align]| {
+            comp.process.free(comp.threadid, &ptr);
             Value::from(())
         }),
-        native_comp_new("memchr", |args| {
-            for i in 0..args.args[2].as_u64() {
-                let ptr = args.ctx().value_from_address(args.args[0].as_u64() + i);
-                let v = args.process.load(args.tctx, &ptr, Layout::from_bytes(1, 1), None);
-                if v.unwrap_u8() as u32 == args.args[1].unwrap_u32() {
+        native_comp_new("memchr", |comp, [ptr, value, num]| {
+            for i in 0..num.as_u64() {
+                let ptr = comp.ctx().value_from_address(ptr.as_u64() + i);
+                let v = comp.process.load(comp.threadid, &ptr, Layout::from_bytes(1, 1), None);
+                if v.unwrap_u8() as u32 == value.unwrap_u32() {
                     return ptr;
                 }
             }
-            args.ctx().value_from_address(0)
+            comp.ctx().value_from_address(0)
         }),
-        native_comp_new("strlen", |args| {
+        native_comp_new("strlen", |comp, [str]| {
             for i in 0.. {
-                let ptr = args.ctx().value_from_address(args.args[0].as_u64() + i);
-                let v = args.process.load(args.tctx, &ptr, Layout::from_bytes(1, 1), None);
+                let ptr = comp.ctx().value_from_address(str.as_u64() + i);
+                let v = comp.process.load(comp.threadid, &ptr, Layout::from_bytes(1, 1), None);
                 if v.unwrap_u8() as u32 == 0 {
-                    return args.ctx().value_from_address(i);
+                    return comp.ctx().value_from_address(i);
                 }
             }
             unreachable!();
         }),
-        native_comp_new("memcmp", |args| {
-            for i in 0..args.args[2].as_u64() {
-                let ptr1 = args.ctx().value_from_address(args.args[0].as_u64() + i);
-                let ptr2 = args.ctx().value_from_address(args.args[1].as_u64() + i);
-                let v1 = args.process.load(args.tctx, &ptr1, Layout::from_bytes(1, 1), None);
-                let v2 = args.process.load(args.tctx, &ptr2, Layout::from_bytes(1, 1), None);
+        native_comp_new("memcmp", |comp, [ptr1, ptr2, num]| {
+            for i in 0..num.as_u64() {
+                let ptr1 = comp.ctx().value_from_address(ptr1.as_u64() + i);
+                let ptr2 = comp.ctx().value_from_address(ptr2.as_u64() + i);
+                let v1 = comp.process.load(comp.threadid, &ptr1, Layout::from_bytes(1, 1), None);
+                let v2 = comp.process.load(comp.threadid, &ptr2, Layout::from_bytes(1, 1), None);
                 match v1.unwrap_u8().cmp(&v2.unwrap_u8()) {
                     Ordering::Less => return Value::from(-1i32),
                     Ordering::Equal => {}
@@ -303,10 +311,10 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             }
             Value::from(0i32)
         }),
-        native_comp_new("getenv", |args| {
+        native_comp_new("getenv", |comp, [name]| {
             let mut cstr = vec![];
-            for i in args.args[0].as_u64().. {
-                let c = args.process.load(args.tctx, &Value::from(i), Layout::of_int(8), None).unwrap_u8();
+            for i in name.as_u64().. {
+                let c = comp.process.load(comp.threadid, &Value::from(i), Layout::of_int(8), None).unwrap_u8();
                 if c == 0 { break; } else { cstr.push(c) }
             }
             let str = String::from_utf8(cstr).unwrap();
@@ -314,29 +322,27 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                 "RUST_BACKTRACE" => {
                     let cstr = b"full\0";
                     let layout = Layout::from_bytes(cstr.len() as u64, 1);
-                    let res = args.process.alloc(args.tctx, layout);
-                    args.process.store(args.tctx, &res, &Value::from_bytes(cstr, layout), None);
+                    let res = comp.process.alloc(comp.threadid, layout);
+                    comp.process.store(comp.threadid, &res, &Value::from_bytes(cstr, layout), None);
                     res
                 }
-                _ => args.ctx().value_from_address(0)
+                _ => comp.ctx().value_from_address(0)
             }
         }),
-        native_comp_new("getcwd", |args| {
-            let buf = args.args[0].as_u64();
-            let size = args.args[1].as_u64();
-            if buf != 0 {
-                if size != 0 {
-                    args.process.store(args.tctx, &args.args[0], &Value::from(0u8), None);
+        native_comp_new("getcwd", |comp, [buf, size]| {
+            if buf.as_u64() != 0 {
+                if size.as_u64() != 0 {
+                    comp.process.store(comp.threadid, &buf, &Value::from(0u8), None);
                 }
-                args.args[0].clone()
+                buf
             } else {
                 let layout = Layout::of_int(8);
-                let res = args.process.alloc(args.tctx, layout);
-                args.process.store(args.tctx, &res, &Value::from(0u8), None);
+                let res = comp.process.alloc(comp.threadid, layout);
+                comp.process.store(comp.threadid, &res, &Value::from(0u8), None);
                 res
             }
         }),
-        native_comp_new("_Unwind_RaiseException", |args| {
+        native_comp_new("_Unwind_RaiseException", |comp, [object]| {
             panic!("Unwinding!");
         }),
         native_exec_new(

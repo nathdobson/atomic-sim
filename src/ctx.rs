@@ -26,12 +26,6 @@ pub struct EvalCtx {
     pub module: Option<usize>,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ThreadCtx {
-    pub threadid: usize,
-}
-
-
 impl<'ctx> Ctx<'ctx> {
     pub fn new(modules: &'ctx [Module], native: Vec<Rc<dyn 'ctx + Func<'ctx>>>) -> Ctx<'ctx> {
         let mut functions: HashMap<Symbol, Rc<dyn 'ctx + Func<'ctx>>> = HashMap::new();

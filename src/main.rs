@@ -31,6 +31,7 @@ mod native;
 mod interp;
 mod backtrace;
 mod flow;
+mod compute;
 
 pub fn main() {
     let mut modules = vec![];
