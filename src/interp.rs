@@ -34,8 +34,8 @@ struct InterpFrame<'ctx> {
     pub ctx: Rc<Ctx<'ctx>>,
     pub fun: &'ctx Function,
     pub origin: Option<&'ctx Name>,
-    pub temps: HashMap<&'ctx Name, Rc<Thunk<'ctx>>>,
-    pub allocs: Vec<Rc<Thunk<'ctx>>>,
+    pub temps: HashMap<&'ctx Name, Thunk<'ctx>>,
+    pub allocs: Vec<Thunk<'ctx>>,
     pub result: Option<&'ctx Name>,
     pub blocks: HashMap<&'ctx Name, &'ctx BasicBlock>,
     pub ectx: EvalCtx,
@@ -43,7 +43,7 @@ struct InterpFrame<'ctx> {
 
 enum DecodeResult<'ctx> {
     Jump(&'ctx Name),
-    Return(Rc<Thunk<'ctx>>),
+    Return(Thunk<'ctx>),
 }
 
 impl<'ctx> Func<'ctx> for InterpFunc<'ctx> {
@@ -51,7 +51,7 @@ impl<'ctx> Func<'ctx> for InterpFunc<'ctx> {
         self.src.name.as_str()
     }
 
-    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
+    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Thunk<'ctx>> {
         Box::pin(InterpFrame::call(args.ctx.clone(), self.ectx, args.data, args.backtrace, self.src, args.args))
     }
 }
@@ -62,7 +62,7 @@ impl<'ctx> InterpFrame<'ctx> {
                           data: &'a DataFlow<'ctx>,
                           backtrace: &'a Backtrace<'ctx>,
                           fun: &'ctx Function,
-                          params: Vec<Rc<Thunk<'ctx>>>) -> Rc<Thunk<'ctx>> {
+                          params: Vec<Thunk<'ctx>>) -> Thunk<'ctx> {
         let temps =
             fun.parameters.iter()
                 .zip(params.into_iter())
@@ -84,10 +84,10 @@ impl<'ctx> InterpFrame<'ctx> {
         };
         frame.decode(data, backtrace).await
     }
-    pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>, backtrace: &'a Backtrace<'ctx>) -> impl Future<Output=Rc<Thunk<'ctx>>> + 'a {
+    pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>, backtrace: &'a Backtrace<'ctx>) -> impl Future<Output=Thunk<'ctx>> + 'a {
         Box::pin(async move { self.decode_impl(data, backtrace).await })
     }
-    pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>, backtrace: &Backtrace<'ctx>) -> Rc<Thunk<'ctx>> {
+    pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>, backtrace: &Backtrace<'ctx>) -> Thunk<'ctx> {
         let mut block = self.fun.basic_blocks.get(0).unwrap();
         loop {
             for instr in block.instrs.iter() {
@@ -326,7 +326,7 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Terminator::Ret(ret) => {
                 for x in self.allocs.iter() {
-                    data.add_thunk(vec![x.clone()], |args| {
+                    data.thunk(vec![x.clone()], |args| {
                         args.process.free(args.tctx, &args.args[0]);
                         Value::from(())
                     }).await;
@@ -339,7 +339,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 DecodeResult::Return(result)
             }
             Terminator::CondBr(condbr) => {
-                if self.get_temp(data, &condbr.condition).await.get().await.unwrap_bool() {
+                if self.get_temp(data, &condbr.condition).await.await.unwrap_bool() {
                     DecodeResult::Jump(&condbr.true_dest)
                 } else {
                     DecodeResult::Jump(&condbr.false_dest)
@@ -354,11 +354,11 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Terminator::Switch(switch) => {
                 let cond = self.get_temp(data, &switch.operand).await;
-                let cond = cond.get().await;
+                let cond = cond.await;
                 let mut target = None;
                 for (pat, dest) in switch.dests.iter() {
                     let (_, pat) = self.ctx.get_constant(self.ectx, &pat);
-                    if &pat == cond {
+                    if pat == cond {
                         target = Some(dest);
                     }
                 }
@@ -367,7 +367,7 @@ impl<'ctx> InterpFrame<'ctx> {
             term => todo!("{:?}", term)
         }
     }
-    async fn get_temp<'a>(&'a mut self, data: &'a DataFlow<'ctx>, oper: &'ctx Operand) -> Rc<Thunk<'ctx>> {
+    async fn get_temp<'a>(&'a mut self, data: &'a DataFlow<'ctx>, oper: &'ctx Operand) -> Thunk<'ctx> {
         match oper {
             Operand::LocalOperand { name, .. } => {
                 self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
@@ -393,8 +393,8 @@ impl<'ctx> InterpFrame<'ctx> {
             Either::Right(fun) => fun,
         };
         let fun = self.get_temp(data, fun).await;
-        let fun = fun.get().await;
-        let fun = self.ctx.reverse_lookup(fun);
+        let fun = fun.clone().await;
+        let fun = self.ctx.reverse_lookup(&fun);
         let fun = self.ctx.functions.get(&fun).cloned().unwrap_or_else(|| panic!("Unknown function {:?}", fun));
         let mut deps = vec![];
         for (oper, _) in arguments.iter() {
@@ -411,9 +411,9 @@ impl<'ctx> InterpFrame<'ctx> {
     async fn add_thunk<'a>(&'a mut self,
                            data: &'a DataFlow<'ctx>,
                            dest: Option<&'ctx Name>,
-                           deps: Vec<Rc<Thunk<'ctx>>>,
-                           compute: impl 'ctx + FnOnce(ComputeArgs<'ctx, '_>) -> Value) -> Rc<Thunk<'ctx>> {
-        let thunk = data.add_thunk(deps, compute).await;
+                           deps: Vec<Thunk<'ctx>>,
+                           compute: impl 'ctx + FnOnce(ComputeArgs<'ctx, '_>) -> Value) -> Thunk<'ctx> {
+        let thunk = data.thunk(deps, compute).await;
         if let Some(dest) = dest {
             self.temps.insert(dest, thunk.clone());
         }

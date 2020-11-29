@@ -11,13 +11,16 @@ use std::cell::{RefCell, Ref};
 use std::borrow::BorrowMut;
 use llvm_ir::instruction::Atomicity;
 use crate::layout::Layout;
+use std::future::Future;
+use futures::task::{Context, Poll};
+use std::pin::Pin;
 
 const PIPELINE_SIZE: usize = 1;
 
 pub struct DataFlowInner<'ctx> {
     threadid: usize,
     seq: usize,
-    thunks: BTreeMap<usize, Rc<Thunk<'ctx>>>,
+    thunks: BTreeMap<usize, Thunk<'ctx>>,
 }
 
 pub struct DataFlow<'ctx> {
@@ -54,29 +57,31 @@ pub enum ThunkState<'ctx> {
     Sandbag,
 }
 
-pub struct Thunk<'ctx> {
+pub struct ThunkInner<'ctx> {
     pub tctx: ThreadCtx,
     pub seq: usize,
-    pub deps: Vec<Rc<Thunk<'ctx>>>,
-    pub address: Option<Rc<Thunk<'ctx>>>,
+    pub deps: Vec<Thunk<'ctx>>,
+    pub address: Option<Thunk<'ctx>>,
     pub load: Option<LoadOrdering>,
     pub store: Option<(StoreOrdering, StoreOrdering)>,
     pub value: RefCell<ThunkState<'ctx>>,
 }
 
+#[derive(Clone)]
+pub struct Thunk<'ctx>(Rc<ThunkInner<'ctx>>);
 
 impl<'ctx> Thunk<'ctx> {
-    pub async fn get(&self) -> &Value {
-        loop {
-            if let Some(v) = self.try_get() {
-                return v;
-            } else {
-                pending!();
-            }
-        }
-    }
+    // pub async fn get(&self) -> &Value {
+    //     loop {
+    //         if let Some(v) = self.try_get() {
+    //             return v;
+    //         } else {
+    //             pending!();
+    //         }
+    //     }
+    // }
     pub fn try_get(&self) -> Option<&Value> {
-        let r = self.value.borrow();
+        let r = self.0.value.borrow();
         match &*r {
             ThunkState::Pending(_) => return None,
             ThunkState::Ready(_) => {}
@@ -90,13 +95,13 @@ impl<'ctx> Thunk<'ctx> {
         }
     }
     pub fn step(&self, process: &mut Process<'ctx>, tctx: ThreadCtx) -> bool {
-        let args = self.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
-        match &*self.value.borrow() {
+        let args = self.0.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
+        match &*self.0.value.borrow() {
             ThunkState::Ready(_) => panic!("Already ready"),
             ThunkState::Pending(_) => {}
             ThunkState::Sandbag => unreachable!(),
         }
-        let mut r = self.value.borrow_mut();
+        let mut r = self.0.value.borrow_mut();
         match mem::replace(&mut *r, ThunkState::Sandbag) {
             ThunkState::Pending(compute) => {
                 *r = ThunkState::Ready(compute(ComputeArgs {
@@ -120,14 +125,14 @@ impl<'ctx> DataFlow<'ctx> {
             inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
         }
     }
-    pub async fn add_thunk(&self, deps: Vec<Rc<Thunk<'ctx>>>, compute: impl 'ctx + for<'a> FnOnce(ComputeArgs<'ctx, 'a>) -> Value) -> Rc<Thunk<'ctx>> {
+    pub async fn thunk(&self, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeArgs<'ctx, 'a>) -> Value) -> Thunk<'ctx> {
         while self.inner.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
         let mut this = self.inner.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
-        let thunk: Rc<Thunk<'ctx>> = Rc::new(Thunk {
+        let thunk: Thunk<'ctx> = Thunk(Rc::new(ThunkInner {
             tctx: ThreadCtx { threadid: this.threadid },
             seq,
             deps,
@@ -135,21 +140,21 @@ impl<'ctx> DataFlow<'ctx> {
             load: None,
             store: None,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
-        });
+        }));
         this.thunks.insert(seq, thunk.clone());
         thunk
     }
-    pub async fn add_constant(&self, value: Value) -> Rc<Thunk<'ctx>> {
-        self.add_thunk(vec![], |_| value).await
+    pub async fn constant(&self, v: Value) -> Thunk<'ctx> {
+        self.thunk(vec![], |_| v).await
     }
-    pub async fn add_store<'a>(&'a self, address: Rc<Thunk<'ctx>>, value: Rc<Thunk<'ctx>>, atomicity: Option<&'ctx Atomicity>) -> Rc<Thunk<'ctx>> {
-        self.add_thunk(vec![address, value], move |args| {
+    pub async fn store<'a>(&'a self, address: Thunk<'ctx>, value: Thunk<'ctx>, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+        self.thunk(vec![address, value], move |args| {
             args.process.store(args.tctx, args.args[0], args.args[1], atomicity);
             Value::from(())
         }).await
     }
-    pub async fn add_load<'a>(&'a self, address: Rc<Thunk<'ctx>>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Rc<Thunk<'ctx>> {
-        self.add_thunk(vec![address], move |args| {
+    pub async fn load<'a>(&'a self, address: Thunk<'ctx>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+        self.thunk(vec![address], move |args| {
             args.process.load(args.tctx, args.args[0], layout, atomicity)
         }).await
     }
@@ -195,14 +200,14 @@ struct DebugDeps<'a>(&'a [Rc<Thunk<'a>>]);
 
 impl<'a> Debug for DebugDeps<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.iter().map(|thunk| thunk.seq)).finish()
+        f.debug_list().entries(self.0.iter().map(|thunk| thunk.0.seq)).finish()
     }
 }
 
 
 impl<'ctx> Debug for Thunk<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}_{} = {:?} [{:?}]", self.tctx.threadid, self.seq, self.value.borrow(), self.deps.iter().map(|dep| dep.seq).collect::<Vec<_>>())
+        write!(f, "{}_{} = {:?} [{:?}]", self.0.tctx.threadid, self.0.seq, self.0.value.borrow(), self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>())
     }
 }
 
@@ -212,6 +217,18 @@ impl<'ctx> Debug for ThunkState<'ctx> {
             ThunkState::Pending(_) => write!(f, "ThunkState::Pending"),
             ThunkState::Ready(value) => write!(f, "ThunkState::Ready({:?})", value),
             ThunkState::Sandbag => write!(f, "ThunkState::Pending"),
+        }
+    }
+}
+
+impl<'ctx> Future for Thunk<'ctx> {
+    type Output = Value;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(v) = self.try_get() {
+            Poll::Ready(v.clone())
+        } else {
+            Poll::Pending
         }
     }
 }

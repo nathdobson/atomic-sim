@@ -47,7 +47,7 @@ impl<'ctx> Thread<'ctx> {
                 let mut deps = vec![];
                 for value in params {
                     let value = value.clone();
-                    deps.push(data.add_thunk(vec![], |_| { value }).await);
+                    deps.push(data.thunk(vec![], |_| { value }).await);
                 }
                 main.call_imp(ExecArgs { ctx: &ctx, data: &*data, backtrace: &Backtrace::empty(), args: deps }).await;
             }

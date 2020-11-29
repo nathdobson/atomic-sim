@@ -1,7 +1,8 @@
 #![feature(map_first_last)]
 #![feature(bool_to_option)]
 #![feature(cell_leak)]
-#![allow(unused_imports, unused_variables)]
+#![feature(const_generics)]
+#![allow(unused_imports, unused_variables, incomplete_features)]
 #![deny(unused_must_use)]
 
 use llvm_ir::Module;

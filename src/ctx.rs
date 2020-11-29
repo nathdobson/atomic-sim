@@ -80,6 +80,9 @@ impl<'ctx> Ctx<'ctx> {
         }
         Value::from(x)
     }
+    pub fn null(&self) -> Value {
+        self.value_from_address(0)
+    }
     pub fn aggregate_zero(&self, ty: &TypeRef) -> Value {
         match &**ty {
             Type::ArrayType { element_type, num_elements } => {

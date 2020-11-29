@@ -8,6 +8,7 @@ use futures::future::LocalBoxFuture;
 use std::marker::PhantomData;
 use futures::FutureExt;
 use crate::backtrace::BacktraceFrame;
+use std::convert::TryInto;
 
 struct NativeComp<'ctx> {
     name: &'ctx str,
@@ -16,7 +17,7 @@ struct NativeComp<'ctx> {
 
 struct NativeExec<'ctx> {
     name: &'ctx str,
-    imp: Rc<dyn 'ctx + for<'exec> Fn(ExecArgs<'ctx, 'exec>) -> LocalBoxFuture<'exec, Rc<Thunk<'ctx>>>>,
+    imp: Rc<dyn 'ctx + for<'exec> Fn(ExecArgs<'ctx, 'exec>) -> LocalBoxFuture<'exec, Value>>,
 }
 
 impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
@@ -24,9 +25,9 @@ impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
         self.name
     }
 
-    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
+    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Thunk<'ctx>> {
         let imp = self.imp.clone();
-        Box::pin(args.data.add_thunk(args.args, move |args| imp(args)))
+        Box::pin(args.data.thunk(args.args, move |args| imp(args)))
     }
 }
 
@@ -34,8 +35,9 @@ impl<'ctx> Func<'ctx> for NativeExec<'ctx> {
     fn name(&self) -> &'ctx str {
         self.name
     }
-    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
-        (self.imp)(args)
+    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Thunk<'ctx>> {
+        let data = args.data;
+        Box::pin(async move { data.constant((self.imp)(args).await).await })
     }
 }
 
@@ -80,7 +82,7 @@ pub fn native_comp_new<'ctx>(
 
 pub fn native_exec_new<'ctx>(
     name: &'ctx str,
-    imp: impl 'static + for<'exec> Fn(ExecArgs<'ctx, 'exec>) -> LocalBoxFuture<'exec, Rc<Thunk<'ctx>>>)
+    imp: impl 'static + for<'exec> Fn(ExecArgs<'ctx, 'exec>) -> LocalBoxFuture<'exec, Value>)
     -> Rc<dyn 'ctx + Func<'ctx>> {
     Rc::new(NativeExec {
         name,
@@ -320,79 +322,89 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             panic!("Unwinding!");
         }),
         native_exec_new("_Unwind_Backtrace", |args| async move {
-            let trace = args.args[0].get().await.clone();
-            let trace_argument = args.args[1].get().await.clone();
+            let [trace, trace_argument] = await_args(&args.args).await;
             println!("{:?}", args.backtrace);
-            let udata = args.data.add_constant(trace_argument).await;
             for bt in args.backtrace.iter() {
-                let bctx = args.data.add_constant(args.ctx.value_from_address(0)).await;
-                let ret = args.ctx.reverse_lookup_fun(&trace).call_imp(ExecArgs {
-                    ctx: args.ctx,
-                    data: args.data,
-                    backtrace: &args.backtrace.prepend(BacktraceFrame { name: "_Unwind_Backtrace" }),
-                    args: vec![bctx, udata.clone()],
-                }).await;
-                let ret = ret.get().await;
+                let bctx = args.ctx.value_from_address(0);
+                let ret = invoke(&args, &trace, &[&bctx, &trace_argument]).await;
                 println!("Returned {:?}", ret);
             }
-            args.data.add_constant(Value::from(0u32)).await
+            Value::from(0u32)
         }.boxed_local()),
         native_exec_new("_Unwind_GetIP", |args| async move {
-            let bctx = args.args[0].get().await;
+            let [bctx] = await_args(&args.args).await;
             println!("Calling _Unwind_GetIP({:?})", bctx);
-            args.data.add_constant(Value::from(0xDEADBEEFu64)).await
+            Value::from(0xDEADBEEFu64)
         }.boxed_local()),
         native_exec_new("_NSGetExecutablePath", |args| async move {
-            let buf = args.args[0].get().await;
-            let len_ptr = args.args[1].get().await;
-            let len = args.data.add_load(args.args[1].clone(), args.ctx.layout_of_ptr(), None).await;
-            let len_value = len.get().await;
+            let [buf, len_ptr] = await_args(&args.args).await;
+            let len = load(&args, &len_ptr, args.ctx.layout_of_ptr()).await;
             let filename = b"unknown.rs\0";
-            if len_value.as_u64() < filename.len() as u64 {
-                return args.data.add_constant(Value::from(0u32)).await;
+            if len.as_u64() < filename.len() as u64 {
+                return Value::from(0u32);
             }
-            let filename_length = args.data.add_constant(Value::from(filename.len() as u32)).await;
-            let filename_thunk = args.data.add_constant(Value::from_bytes_unaligned(filename)).await;
-            args.data.add_store(args.args[0].clone(), filename_thunk, None).await;
-            args.data.add_store(args.args[1].clone(), filename_length, None).await;
-            args.data.add_constant(Value::from(0u32)).await
+            store(&args, &buf, &Value::from_bytes_unaligned(filename)).await;
+            store(&args, &len_ptr, &Value::from(filename.len() as u32)).await;
+            Value::from(0u32)
         }.boxed_local()),
         native_exec_new("__rdos_backtrace_create_state", |args| async move {
-            let filename = args.args[0].get().await;
-            let threaded = args.args[1].get().await;
-            let error = args.args[2].get().await;
-            let data = args.args[3].get().await;
+            let [filename, threaded, error, data] = await_args(&args.args).await;
             println!("Calling __rdos_backtrace_create_state({:?},{:?},{:?},{:?})", filename, threaded, error, data);
-            args.data.add_constant(Value::from(0xCAFEBABEu64)).await
+            Value::from(0xCAFEBABEu64)
         }.boxed_local()),
         native_exec_new("__rdos_backtrace_syminfo", |args| async move {
-            let state = args.args[0].get().await;
-            let addr = args.args[1].get().await;
-            let cb = args.args[2].get().await;
-            let error = args.args[3].get().await;
-            let data = args.args[4].get().await;
-            let zero = args.data.add_constant(args.ctx.value_from_address(0)).await;
-            args.ctx.reverse_lookup_fun(cb).call_imp(ExecArgs {
-                ctx: args.ctx,
-                data: args.data,
-                backtrace: &args.backtrace.prepend(BacktraceFrame { name: "__rdos_backtrace_syminfo" }),
-                args: vec![args.args[4].clone(), args.args[1].clone(), zero.clone(), zero.clone(), zero],
-            }).await;
-            args.data.add_constant(Value::from(0u32)).await
+            let [state, addr, cb, error, data] = await_args(&args.args).await;
+            let zero = args.ctx.null();
+            invoke(&args, &cb, &[&data, &addr, &zero, &zero, &zero]).await;
+            Value::from(0u32)
         }.boxed_local()),
         native_exec_new("dladdr", |args| async move {
-            let addr = args.args[0].get().await;
-            let info = args.args[1].get().await;
+            let [addr, info] = await_args(&args.args).await;
             println!("Calling dladdr({:?}, {:?})", addr, info);
-            args.data.add_constant(Value::from(1u32)).await
+            Value::from(1u32)
         }.boxed_local()),
         native_exec_new("__rdos_backtrace_pcinfo", |args| async move {
-            println!("Calling __rdos_backtrace_pcinfo({:?})", args.args);
-            args.data.add_constant(Value::from(0u32)).await
+            let [state, pc, cb, error, data] = await_args(&args.args).await;
+            println!("Calling __rdos_backtrace_pcinfo({:?}, {:?}, {:?}, {:?}, {:?})", state, pc, cb, error, data);
+            let null = args.ctx.null();
+            invoke(&args, &cb, &[&data, &pc, &null, &Value::from(0u32), &null]).await;
+            Value::from(0u32)
         }.boxed_local()),
     ]);
     result.append(&mut overflow_binop!("uadd", "sadd", wrapping_add, checked_add));
     result.append(&mut overflow_binop!("umul", "smul", wrapping_mul, checked_mul));
     result.append(&mut overflow_binop!("usub", "ssub", wrapping_sub, checked_sub));
     result
+}
+
+async fn invoke<'a, 'ctx>(args: &'a ExecArgs<'ctx, 'a>, fun: &'a Value, fargs: &[&Value]) -> Value {
+    let mut thunks = Vec::with_capacity(fargs.len());
+    for farg in fargs.iter() {
+        thunks.push(args.data.constant((*farg).clone()).await);
+    }
+    args.ctx.reverse_lookup_fun(&fun).call_imp(ExecArgs {
+        ctx: args.ctx,
+        data: args.data,
+        backtrace: &args.backtrace.prepend(BacktraceFrame { name: "<native>" }),
+        args: thunks,
+    }).await.await
+}
+
+async fn load<'a, 'ctx>(args: &'a ExecArgs<'ctx, 'a>, address: &Value, layout: Layout) -> Value {
+    args.data.load(args.data.constant(address.clone()).await, layout, None).await.await
+}
+
+async fn store<'a, 'ctx>(args: &'a ExecArgs<'ctx, 'a>, address: &Value, value: &Value) {
+    args.data.store(args.data.constant(address.clone()).await,
+                    args.data.constant(value.clone()).await,
+                    None).await.await;
+}
+
+async fn await_args<'ctx, const N: usize>(args: &[Thunk<'ctx>]) -> [Value; N] {
+    let mut result = Vec::with_capacity(args.len());
+    for arg in args {
+        result.push(arg.clone().await);
+    }
+    assert_eq!(result.len(), N);
+    result.try_into().unwrap()
 }
