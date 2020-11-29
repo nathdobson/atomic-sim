@@ -86,6 +86,9 @@ impl<'ctx> Process<'ctx> {
             self.store(tctx, &dst, &value, None);
         }
     }
+    pub fn debug_info(&self, ptr: &Value) -> String {
+        format!("{:?} {:?} {:?}", ptr, self.ctx.try_reverse_lookup(ptr), self.memory.debug_info(ptr))
+    }
 }
 
 impl<'ctx> Debug for Process<'ctx> {

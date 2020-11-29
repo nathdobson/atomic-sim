@@ -28,6 +28,7 @@ mod data;
 mod symbols;
 mod native;
 mod interp;
+mod backtrace;
 
 pub fn main() {
     let mut modules = vec![];

@@ -11,10 +11,18 @@ use std::cmp::Ordering;
 use crate::data::{ComputeArgs, DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
+use crate::backtrace::Backtrace;
+
+pub struct ExecArgs<'ctx, 'exec> {
+    pub ctx: &'exec Rc<Ctx<'ctx>>,
+    pub data: &'exec DataFlow<'ctx>,
+    pub backtrace: &'exec Backtrace<'ctx>,
+    pub args: Vec<Rc<Thunk<'ctx>>>,
+}
 
 pub trait Func<'ctx>: 'ctx {
     fn name(&self) -> &'ctx str;
-    fn call_imp<'a>(&'a self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Option<Rc<Thunk<'ctx>>>>;
+    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>>;
 }
 
 impl<'ctx> Debug for dyn 'ctx + Func<'ctx> {

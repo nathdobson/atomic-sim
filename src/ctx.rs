@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
-    pub functions: HashMap<Symbol<'ctx>, Rc<dyn 'ctx + Func<'ctx>>>,
+    pub functions: HashMap<Symbol<'ctx>, Rc<dyn Func<'ctx>>>,
     pub ptr_bits: u64,
     pub page_size: u64,
     symbols: SymbolTable<'ctx>,
@@ -270,6 +270,13 @@ impl<'ctx> Ctx<'ctx> {
     }
     pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
         self.symbols.reverse_lookup(address)
+    }
+    pub fn reverse_lookup_fun(&self, address: &Value) -> Rc<dyn Func<'ctx>> {
+        let name = self.reverse_lookup(address);
+        self.functions.get(&name).unwrap_or_else(|| panic!("No such function {:?}", name)).clone()
+    }
+    pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol<'ctx>> {
+        self.symbols.try_reverse_lookup(address)
     }
     pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
         self.symbols.lookup(ectx, name)

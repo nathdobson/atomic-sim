@@ -9,6 +9,8 @@ use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
 use std::cell::{RefCell, Ref};
 use std::borrow::BorrowMut;
+use llvm_ir::instruction::Atomicity;
+use crate::layout::Layout;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -19,7 +21,6 @@ pub struct DataFlowInner<'ctx> {
 }
 
 pub struct DataFlow<'ctx> {
-    ctx: Rc<Ctx<'ctx>>,
     inner: RefCell<DataFlowInner<'ctx>>,
 }
 
@@ -114,9 +115,8 @@ impl<'ctx> Thunk<'ctx> {
 }
 
 impl<'ctx> DataFlow<'ctx> {
-    pub fn new(ctx: Rc<Ctx<'ctx>>, threadid: usize) -> Self {
+    pub fn new(threadid: usize) -> Self {
         DataFlow {
-            ctx,
             inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
         }
     }
@@ -139,6 +139,20 @@ impl<'ctx> DataFlow<'ctx> {
         this.thunks.insert(seq, thunk.clone());
         thunk
     }
+    pub async fn add_constant(&self, value: Value) -> Rc<Thunk<'ctx>> {
+        self.add_thunk(vec![], |_| value).await
+    }
+    pub async fn add_store<'a>(&'a self, address: Rc<Thunk<'ctx>>, value: Rc<Thunk<'ctx>>, atomicity: Option<&'ctx Atomicity>) -> Rc<Thunk<'ctx>> {
+        self.add_thunk(vec![address, value], move |args| {
+            args.process.store(args.tctx, args.args[0], args.args[1], atomicity);
+            Value::from(())
+        }).await
+    }
+    pub async fn add_load<'a>(&'a self, address: Rc<Thunk<'ctx>>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Rc<Thunk<'ctx>> {
+        self.add_thunk(vec![address], move |args| {
+            args.process.load(args.tctx, args.args[0], layout, atomicity)
+        }).await
+    }
     pub fn len(&self) -> usize {
         self.inner.borrow().thunks.len()
     }
@@ -152,9 +166,6 @@ impl<'ctx> DataFlow<'ctx> {
                 false
             }
         }
-    }
-    pub fn ctx(&self) -> &Rc<Ctx<'ctx>> {
-        &self.ctx
     }
 }
 

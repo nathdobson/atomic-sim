@@ -32,6 +32,9 @@ impl<'ctx> SymbolTable<'ctx> {
     pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
         self.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
     }
+    pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol<'ctx>> {
+        self.reverse.get(&address).cloned()
+    }
     pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
         if let Some(internal) = self.forward.get(&Symbol::Internal(ectx.module.unwrap(), name)) {
             internal

@@ -2,8 +2,10 @@ use std::ops::{Add, Index, IndexMut, BitXor, Rem, Mul, Sub, BitAnd, Div, Shr, Sh
 use std::mem::size_of;
 use std::cmp::Ordering;
 use crate::layout::{Layout, AggrLayout};
+use std::fmt::{Debug, Formatter};
+use std::fmt;
 
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Value {
     layout: Layout,
     vec: Vec<u8>,
@@ -75,6 +77,12 @@ impl Value {
             vec: bytes.to_vec(),
         }
     }
+    pub fn from_bytes_unaligned(bytes: &[u8]) -> Self {
+        Self {
+            layout: Layout::from_bytes(bytes.len() as u64, 1),
+            vec: bytes.to_vec(),
+        }
+    }
     pub fn sext(&self, to: u64) -> Value {
         match (self.bits(), to) {
             (8, 16) => Value::from(self.unwrap_i8() as i16),
@@ -85,7 +93,7 @@ impl Value {
             _ => todo!("{:?} -> {:?}", self.bits(), to),
         }
     }
-    pub fn sshr(&self, other:&Value) -> Value {
+    pub fn sshr(&self, other: &Value) -> Value {
         match (self.bits(), other.bits()) {
             (8, 8) => Value::from(self.unwrap_i8() << other.unwrap_u8()),
             (16, 16) => Value::from(self.unwrap_i16() << other.unwrap_u16()),
@@ -339,5 +347,21 @@ impl BitXor for &Value {
         unsigned_binop!(bitxor, self, rhs);
         bool_binop!(bitxor, self, rhs);
         todo!("{:?} {:?}", self, rhs)
+    }
+}
+
+impl Debug for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.bits() == 0 {
+            write!(f, "()")?;
+        } else if self.bits() == 1 {
+            write!(f, "{}", self.unwrap_bool())?;
+        } else {
+            assert_eq!(self.bits() % 8, 0);
+            for x in self.vec.iter() {
+                write!(f, "{:02X}", x)?;
+            }
+        }
+        Ok(())
     }
 }

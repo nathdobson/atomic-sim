@@ -1,7 +1,7 @@
 use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand};
 use std::collections::HashMap;
 use crate::ctx::{EvalCtx, Ctx};
-use crate::function::Func;
+use crate::function::{Func, ExecArgs};
 use crate::data::{DataFlow, Thunk, ComputeArgs};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
@@ -12,6 +12,7 @@ use futures::{Future, FutureExt};
 use crate::value::{Value, add_u64_i64};
 use llvm_ir::function::ParameterAttribute;
 use std::fmt::Debug;
+use crate::backtrace::{Backtrace, BacktraceFrame};
 
 #[derive(Debug)]
 pub struct InterpFunc<'ctx> {
@@ -42,7 +43,7 @@ struct InterpFrame<'ctx> {
 
 enum DecodeResult<'ctx> {
     Jump(&'ctx Name),
-    Return(Option<Rc<Thunk<'ctx>>>),
+    Return(Rc<Thunk<'ctx>>),
 }
 
 impl<'ctx> Func<'ctx> for InterpFunc<'ctx> {
@@ -50,16 +51,18 @@ impl<'ctx> Func<'ctx> for InterpFunc<'ctx> {
         self.src.name.as_str()
     }
 
-    fn call_imp<'a>(&'a self, data: &'a DataFlow<'ctx>, args: Vec<Rc<Thunk<'ctx>>>) -> LocalBoxFuture<'a, Option<Rc<Thunk<'ctx>>>> {
-        Box::pin(InterpFrame::call(self.ectx, data, self.src, args))
+    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Rc<Thunk<'ctx>>> {
+        Box::pin(InterpFrame::call(args.ctx.clone(), self.ectx, args.data, args.backtrace, self.src, args.args))
     }
 }
 
 impl<'ctx> InterpFrame<'ctx> {
-    pub async fn call(ectx: EvalCtx,
-                      data: &DataFlow<'ctx>,
-                      fun: &'ctx Function,
-                      params: Vec<Rc<Thunk<'ctx>>>) -> Option<Rc<Thunk<'ctx>>> {
+    pub async fn call<'a>(ctx: Rc<Ctx<'ctx>>,
+                          ectx: EvalCtx,
+                          data: &'a DataFlow<'ctx>,
+                          backtrace: &'a Backtrace<'ctx>,
+                          fun: &'ctx Function,
+                          params: Vec<Rc<Thunk<'ctx>>>) -> Rc<Thunk<'ctx>> {
         let temps =
             fun.parameters.iter()
                 .zip(params.into_iter())
@@ -70,7 +73,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 .map(|block| (&block.name, block))
                 .collect();
         let mut frame = InterpFrame {
-            ctx: data.ctx().clone(),
+            ctx,
             fun,
             origin: None,
             temps,
@@ -79,24 +82,24 @@ impl<'ctx> InterpFrame<'ctx> {
             blocks,
             ectx,
         };
-        frame.decode(&*data.clone()).await
+        frame.decode(data, backtrace).await
     }
-    pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>) -> impl Future<Output=Option<Rc<Thunk<'ctx>>>> + 'a {
-        Box::pin(async move { self.decode_impl(data).await })
+    pub fn decode<'a>(&'a mut self, data: &'a DataFlow<'ctx>, backtrace: &'a Backtrace<'ctx>) -> impl Future<Output=Rc<Thunk<'ctx>>> + 'a {
+        Box::pin(async move { self.decode_impl(data, backtrace).await })
     }
-    pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>) -> Option<Rc<Thunk<'ctx>>> {
+    pub async fn decode_impl(&mut self, data: &DataFlow<'ctx>, backtrace: &Backtrace<'ctx>) -> Rc<Thunk<'ctx>> {
         let mut block = self.fun.basic_blocks.get(0).unwrap();
         loop {
             for instr in block.instrs.iter() {
-                self.decode_instr(data, instr).await;
+                self.decode_instr(data, &backtrace.prepend(BacktraceFrame { name: &*self.fun.name }), instr).await;
             }
-            block = match self.decode_term(data, &block.term).await {
+            block = match self.decode_term(data, &backtrace.prepend(BacktraceFrame { name: &*self.fun.name }), &block.term).await {
                 DecodeResult::Jump(name) => *self.blocks.get(name).unwrap(),
                 DecodeResult::Return(result) => return result,
             };
         }
     }
-    async fn decode_instr<'a>(&'a mut self, data: &'a DataFlow<'ctx>, instr: &'ctx Instruction) {
+    async fn decode_instr<'a>(&'a mut self, data: &'a DataFlow<'ctx>, backtrace: &'a Backtrace<'ctx>, instr: &'ctx Instruction) {
         match instr {
             Instruction::Phi(phi) => {
                 let (oper, _) =
@@ -106,7 +109,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 self.add_thunk(data, Some(&phi.dest), deps, |args| args.args[0].clone()).await;
             }
             Instruction::Call(call) => {
-                self.decode_call(data, &call.function, &call.arguments, call.dest.as_ref()).await;
+                self.decode_call(data, backtrace, &call.function, &call.arguments, call.dest.as_ref()).await;
             }
             Instruction::Alloca(alloca) => {
                 let num = self.get_temp(data, &alloca.num_elements).await;
@@ -316,7 +319,7 @@ impl<'ctx> InterpFrame<'ctx> {
             IntPredicate::SLE => x.as_i128() <= y.as_i128(),
         }
     }
-    async fn decode_term<'a>(&'a mut self, data: &'a DataFlow<'ctx>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
+    async fn decode_term<'a>(&'a mut self, data: &'a DataFlow<'ctx>, backtrace: &'a Backtrace<'ctx>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
         match term {
             Terminator::Br(br) => {
                 DecodeResult::Jump(&br.dest)
@@ -329,9 +332,9 @@ impl<'ctx> InterpFrame<'ctx> {
                     }).await;
                 }
                 let result = if let Some(oper) = ret.return_operand.as_ref() {
-                    Some(self.get_temp(data, oper).await)
+                    self.get_temp(data, oper).await
                 } else {
-                    None
+                    self.add_thunk(data, None, vec![], |args| Value::from(())).await
                 };
                 DecodeResult::Return(result)
             }
@@ -346,7 +349,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 panic!("Unreachable");
             }
             Terminator::Invoke(invoke) => {
-                self.decode_call(data, &invoke.function, &invoke.arguments, Some(&invoke.result)).await;
+                self.decode_call(data, backtrace, &invoke.function, &invoke.arguments, Some(&invoke.result)).await;
                 DecodeResult::Jump(&invoke.return_label)
             }
             Terminator::Switch(switch) => {
@@ -380,6 +383,7 @@ impl<'ctx> InterpFrame<'ctx> {
     }
     async fn decode_call<'a>(&'a mut self,
                              data: &'a DataFlow<'ctx>,
+                             backtrace: &'a Backtrace<'ctx>,
                              function: &'ctx Either<InlineAssembly, Operand>,
                              arguments: &'ctx Vec<(Operand, Vec<ParameterAttribute>)>,
                              dest: Option<&'ctx Name>,
@@ -396,10 +400,13 @@ impl<'ctx> InterpFrame<'ctx> {
         for (oper, _) in arguments.iter() {
             deps.push(self.get_temp(data, oper).await)
         }
-        let result = fun.call_imp(data, deps).await;
-        self.add_thunk(data, dest, result.into_iter().collect(), |args| {
-            args.args.get(0).cloned().cloned().unwrap_or(Value::from(()))
-        }).await;
+        let result = fun.call_imp(ExecArgs { ctx: &self.ctx, data, backtrace, args: deps }).await;
+        if let Some(dest) = dest {
+            self.temps.insert(dest, result);
+        }
+        // self.add_thunk(data, dest, vec![result], |args| {
+        //     args.args.get(0).cloned().cloned().unwrap_or(Value::from(()))
+        // }).await;
     }
     async fn add_thunk<'a>(&'a mut self,
                            data: &'a DataFlow<'ctx>,

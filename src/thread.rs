@@ -26,6 +26,8 @@ use crate::data::Thunk;
 use futures::future::LocalBoxFuture;
 use futures::task::noop_waker_ref;
 use crate::symbols::Symbol;
+use crate::function::ExecArgs;
+use crate::backtrace::Backtrace;
 
 pub struct Thread<'ctx> {
     threadid: usize,
@@ -36,7 +38,7 @@ pub struct Thread<'ctx> {
 
 impl<'ctx> Thread<'ctx> {
     pub fn new(ctx: Rc<Ctx<'ctx>>, main: Symbol<'ctx>, threadid: usize, params: &[Value]) -> Self {
-        let data = Rc::new(DataFlow::new(ctx.clone(), threadid));
+        let data = Rc::new(DataFlow::new(threadid));
         let main = ctx.functions.get(&main).unwrap().clone();
         let params = params.to_vec();
         let control = Box::pin({
@@ -47,7 +49,7 @@ impl<'ctx> Thread<'ctx> {
                     let value = value.clone();
                     deps.push(data.add_thunk(vec![], |_| { value }).await);
                 }
-                main.call_imp(&*data, deps).await;
+                main.call_imp(ExecArgs { ctx: &ctx, data: &*data, backtrace: &Backtrace::empty(), args: deps }).await;
             }
         });
         Thread { threadid, control, data }
