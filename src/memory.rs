@@ -106,7 +106,6 @@ impl<'ctx> Memory<'ctx> {
                 break;
             }
         }
-        //assert!(missing.is_empty());
         Value::from_bytes(&bytes, layout)
     }
     pub fn debug_info(&self, ptr: &Value) -> String {

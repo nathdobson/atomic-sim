@@ -365,3 +365,10 @@ impl Debug for Value {
         Ok(())
     }
 }
+
+
+impl Default for Value{
+    fn default() -> Self {
+        Value::from(())
+    }
+}

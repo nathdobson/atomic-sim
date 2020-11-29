@@ -53,6 +53,9 @@ pub enum StoreOrdering {
 
 pub enum ThunkState<'ctx> {
     Pending(Box<dyn 'ctx + for<'a> FnOnce(ComputeArgs<'ctx, 'a>) -> Value>),
+    Load { layout: Layout },
+    Store,
+    Modify(Box<dyn 'ctx + for<'a> FnOnce(ComputeArgs<'ctx, 'a>) -> (Value, Value)>),
     Ready(Value),
     Sandbag,
 }
@@ -62,8 +65,6 @@ pub struct ThunkInner<'ctx> {
     pub seq: usize,
     pub deps: Vec<Thunk<'ctx>>,
     pub address: Option<Thunk<'ctx>>,
-    pub load: Option<LoadOrdering>,
-    pub store: Option<(StoreOrdering, StoreOrdering)>,
     pub value: RefCell<ThunkState<'ctx>>,
 }
 
@@ -85,13 +86,13 @@ impl<'ctx> Thunk<'ctx> {
         match &*r {
             ThunkState::Pending(_) => return None,
             ThunkState::Ready(_) => {}
-            ThunkState::Sandbag => unreachable!()
+            ThunkState::Sandbag => unreachable!(),
+            _ => todo!()
         }
         let r = Ref::leak(r);
         match r {
-            ThunkState::Pending(_) => unreachable!(),
             ThunkState::Ready(value) => Some(value),
-            ThunkState::Sandbag => unreachable!(),
+            _ => unreachable!()
         }
     }
     pub fn step(&self, process: &mut Process<'ctx>, tctx: ThreadCtx) -> bool {
@@ -99,7 +100,7 @@ impl<'ctx> Thunk<'ctx> {
         match &*self.0.value.borrow() {
             ThunkState::Ready(_) => panic!("Already ready"),
             ThunkState::Pending(_) => {}
-            ThunkState::Sandbag => unreachable!(),
+            _ => unreachable!(),
         }
         let mut r = self.0.value.borrow_mut();
         match mem::replace(&mut *r, ThunkState::Sandbag) {
@@ -113,7 +114,7 @@ impl<'ctx> Thunk<'ctx> {
                 }));
             }
             ThunkState::Ready(_) => panic!("Stepping ready thunk."),
-            ThunkState::Sandbag => unreachable!(),
+            _ => unreachable!(),
         }
         true
     }
@@ -137,8 +138,6 @@ impl<'ctx> DataFlow<'ctx> {
             seq,
             deps,
             address: None,
-            load: None,
-            store: None,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
         this.thunks.insert(seq, thunk.clone());
@@ -217,6 +216,7 @@ impl<'ctx> Debug for ThunkState<'ctx> {
             ThunkState::Pending(_) => write!(f, "ThunkState::Pending"),
             ThunkState::Ready(value) => write!(f, "ThunkState::Ready({:?})", value),
             ThunkState::Sandbag => write!(f, "ThunkState::Pending"),
+            _ => todo!(),
         }
     }
 }

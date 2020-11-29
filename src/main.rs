@@ -30,6 +30,7 @@ mod symbols;
 mod native;
 mod interp;
 mod backtrace;
+mod flow;
 
 pub fn main() {
     let mut modules = vec![];

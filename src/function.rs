@@ -12,17 +12,18 @@ use crate::data::{ComputeArgs, DataFlow, Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use crate::backtrace::Backtrace;
+use crate::flow::FlowCtx;
 
-pub struct ExecArgs<'ctx, 'exec> {
-    pub ctx: &'exec Rc<Ctx<'ctx>>,
-    pub data: &'exec DataFlow<'ctx>,
-    pub backtrace: &'exec Backtrace<'ctx>,
-    pub args: Vec<Thunk<'ctx>>,
-}
+// pub struct ExecArgs<'ctx, 'exec> {
+//     pub ctx: &'exec Rc<Ctx<'ctx>>,
+//     pub data: &'exec DataFlow<'ctx>,
+//     pub backtrace: &'exec Backtrace<'ctx>,
+//     pub args: Vec<Thunk<'ctx>>,
+// }
 
 pub trait Func<'ctx>: 'ctx {
     fn name(&self) -> &'ctx str;
-    fn call_imp<'a>(&'a self, args: ExecArgs<'ctx, 'a>) -> LocalBoxFuture<'a, Thunk<'ctx>>;
+    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>>;
 }
 
 impl<'ctx> Debug for dyn 'ctx + Func<'ctx> {
