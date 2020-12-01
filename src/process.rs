@@ -21,6 +21,8 @@ use std::convert::TryInto;
 use crate::ctx::{Ctx, EvalCtx};
 use std::panic::UnwindSafe;
 use crate::symbols::Symbol;
+use std::time::{Instant, Duration};
+use crate::data::Thunk;
 
 
 pub struct Process<'ctx> {
@@ -29,6 +31,8 @@ pub struct Process<'ctx> {
     pub next_threadid: usize,
     pub rng: XorShiftRng,
     pub memory: Memory<'ctx>,
+    pub flow_time: Duration,
+    pub compute_time: Duration,
 }
 
 
@@ -40,9 +44,11 @@ impl<'ctx> Process<'ctx> {
             next_threadid: 0,
             rng: XorShiftRng::seed_from_u64(0),
             memory: ctx.new_memory(),
+            flow_time: Default::default(),
+            compute_time: Default::default(),
         }
     }
-    pub fn add_thread(&mut self, main: Symbol<'ctx>) {
+    pub fn add_thread(&mut self, main: Symbol) {
         let threadid = ThreadId(self.next_threadid);
         self.next_threadid += 1;
         self.threads.insert(threadid,
@@ -56,9 +62,16 @@ impl<'ctx> Process<'ctx> {
         }
         let index = self.rng.gen_range(0, self.threads.len());
         let (&threadid, thread) = self.threads.iter_mut().nth(index).unwrap();
-        if !thread.step()(self) {
+        let start = Instant::now();
+        let step = thread.step();
+        let middle = Instant::now();
+        if !step(self) {
             self.threads.remove(&threadid);
         }
+        let end = Instant::now();
+        self.compute_time += end - middle;
+        self.flow_time += middle - start;
+
         true
     }
     pub fn free(&mut self, tid: ThreadId, ptr: &Value) {
@@ -88,6 +101,9 @@ impl<'ctx> Process<'ctx> {
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
         format!("{:?} {:?} {:?}", ptr, self.ctx.try_reverse_lookup(ptr), self.memory.debug_info(ptr))
+    }
+    pub fn time(&self) -> (Duration, Duration) {
+        (self.flow_time, self.compute_time)
     }
 }
 

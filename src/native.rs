@@ -11,6 +11,7 @@ use crate::backtrace::BacktraceFrame;
 use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
 use crate::compute::ComputeCtx;
+use crate::ctx::EvalCtx;
 
 struct NativeComp<'ctx> {
     name: &'ctx str,
@@ -27,9 +28,10 @@ impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
         self.name
     }
 
+
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
         let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(args.to_vec(),
+        Box::pin(flow.data().thunk(self.name.to_string(), args.to_vec(),
                                    move |comp: ComputeCtx<'ctx, '_>, args| {
                                        imp(comp, args)
                                    }))
@@ -40,6 +42,8 @@ impl<'ctx> Func<'ctx> for NativeExec<'ctx> {
     fn name(&self) -> &'ctx str {
         self.name
     }
+
+
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
         Box::pin(async move {
             let mut values = Vec::with_capacity(args.len());
@@ -75,6 +79,26 @@ macro_rules! overflow_binop {
                                      Value::from(x.$wrapping(y)),
                                      Value::from(x.$checked(y).is_none())
                                  ].iter().cloned(), false)
+            }
+        )
+    }
+}
+
+macro_rules! unop {
+    ($op:expr, $method:ident) => {
+        vec![
+            unop!($op, $method, "i8", unwrap_u8, u8),
+            unop!($op, $method, "i16", unwrap_u16, u16),
+            unop!($op, $method, "i32", unwrap_u32, u32),
+            unop!($op, $method, "i64", unwrap_u64, u64),
+            unop!($op, $method, "i128", unwrap_u128, u128),
+        ]
+    };
+    ($op:expr, $method:ident, $ty:expr, $unwrap:ident, $cast:ty) => {
+        native_comp_new(
+            &**Box::leak(Box::new(format!("llvm.{}.{}", $op, $ty))),
+            move |comp, [x, _]| {
+                Value::from(x.$unwrap().$method() as $cast)
             }
         )
     }
@@ -124,6 +148,9 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
     let mut result: Vec<Rc<dyn 'ctx + Func<'ctx>>> = vec![];
     result.append(&mut vec![
         native_comp_new("llvm.dbg.declare", |comp, [_, _, _]| {
+            Value::from(())
+        }),
+        native_comp_new("llvm.dbg.value", |comp, [_, _, _]| {
             Value::from(())
         }),
         native_comp_new("signal", |comp, [_, _]| {
@@ -208,10 +235,17 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         native_comp_new("llvm.expect.i1", |comp, [arg, _]| {
             arg
         }),
-        native_comp_new("llvm.cttz.i64", |comp, [arg,_]| {
-            Value::from(arg.as_u64().trailing_zeros() as u64)
+        native_comp_new("llvm.lifetime.start.p0i8", |comp, [_, _]| {
+            Value::from(())
+        }),
+        native_comp_new("llvm.lifetime.end.p0i8", |comp, [_, _]| {
+            Value::from(())
         }),
         native_comp_new("llvm.memcpy.p0i8.p0i8.i64", |comp, [dst, src, cnt, _]| {
+            comp.process.memcpy(comp.threadid, &dst, &src, cnt.as_u64());
+            Value::from(())
+        }),
+        native_comp_new("llvm.memmove.p0i8.p0i8.i64", |comp, [dst, src, cnt, _]| {
             comp.process.memcpy(comp.threadid, &dst, &src, cnt.as_u64());
             Value::from(())
         }),
@@ -259,6 +293,9 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                                None);
             Value::from(())
         }),
+        native_comp_new("llvm.fshl.i64", |comp, [a,b,s]| {
+            Value::from((((a.as_u128()<<64 |b.as_u128())<<s.as_u128())>>64) as u64)
+        }),
         native_comp_new("sigaction", |comp, [signum, act, oldact]| {
             Value::from(0u32)
         }),
@@ -287,16 +324,9 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             }
             comp.ctx().value_from_address(0)
         }),
-        native_comp_new("strlen", |comp, [str]| {
-            for i in 0.. {
-                let ptr = comp.ctx().value_from_address(str.as_u64() + i);
-                let v = comp.process.load(comp.threadid, &ptr, Layout::from_bytes(1, 1), None);
-                if v.unwrap_u8() as u32 == 0 {
-                    return comp.ctx().value_from_address(i);
-                }
-            }
-            unreachable!();
-        }),
+        native_exec_new("strlen", |flow, [str]| async move {
+            flow.strlen(&str).await
+        }.boxed_local()),
         native_comp_new("memcmp", |comp, [ptr1, ptr2, num]| {
             for i in 0..num.as_u64() {
                 let ptr1 = comp.ctx().value_from_address(ptr1.as_u64() + i);
@@ -311,24 +341,20 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             }
             Value::from(0i32)
         }),
-        native_comp_new("getenv", |comp, [name]| {
+        native_exec_new("getenv", |flow, [name]| async move {
             let mut cstr = vec![];
             for i in name.as_u64().. {
-                let c = comp.process.load(comp.threadid, &Value::from(i), Layout::of_int(8), None).unwrap_u8();
+                let c = flow.load(&Value::from(i), Layout::of_int(8)).await.unwrap_u8();
                 if c == 0 { break; } else { cstr.push(c) }
             }
             let str = String::from_utf8(cstr).unwrap();
             match str.as_str() {
                 "RUST_BACKTRACE" => {
-                    let cstr = b"full\0";
-                    let layout = Layout::from_bytes(cstr.len() as u64, 1);
-                    let res = comp.process.alloc(comp.threadid, layout);
-                    comp.process.store(comp.threadid, &res, &Value::from_bytes(cstr, layout), None);
-                    res
+                    flow.string("full").await
                 }
-                _ => comp.ctx().value_from_address(0)
+                _ => flow.ctx().value_from_address(0)
             }
-        }),
+        }.boxed_local()),
         native_comp_new("getcwd", |comp, [buf, size]| {
             if buf.as_u64() != 0 {
                 if size.as_u64() != 0 {
@@ -348,19 +374,16 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         native_exec_new(
             "_Unwind_Backtrace",
             |flow, [trace, trace_argument]| async move {
-                println!("{:?}", flow.backtrace());
                 for bt in flow.backtrace().iter() {
-                    let bctx = flow.ctx().value_from_address(0);
+                    let bctx = flow.ctx().value_from_address(bt.ip + 1);
                     let ret = flow.invoke(&trace, &[&bctx, &trace_argument]).await;
-                    println!("Returned {:?}", ret);
                 }
                 Value::from(0u32)
             }.boxed_local()),
         native_exec_new(
             "_Unwind_GetIP",
             |flow, [bctx]| async move {
-                println!("Calling _Unwind_GetIP({:?})", bctx);
-                Value::from(0xDEADBEEFu64)
+                bctx
             }.boxed_local()),
         native_exec_new(
             "_NSGetExecutablePath",
@@ -377,14 +400,16 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         native_exec_new(
             "__rdos_backtrace_create_state",
             |flow, [filename, threaded, error, data]| async move {
-                println!("Calling __rdos_backtrace_create_state({:?},{:?},{:?},{:?})", filename, threaded, error, data);
+                //println!("Calling __rdos_backtrace_create_state({:?},{:?},{:?},{:?})", filename, threaded, error, data);
                 Value::from(0xCAFEBABEu64)
             }.boxed_local()),
         native_exec_new(
             "__rdos_backtrace_syminfo",
             |flow, [state, addr, cb, error, data]| async move {
                 let zero = flow.ctx().null();
-                flow.invoke(&cb, &[&data, &addr, &zero, &zero, &zero]).await;
+                let one = flow.ctx().value_from_address(1);
+                let name = flow.string(&format!("{:?}", flow.ctx().reverse_lookup(&addr))).await;
+                flow.invoke(&cb, &[&data, &addr, &name, &addr, &one]).await;
                 Value::from(0u32)
             }.boxed_local()),
         native_exec_new(
@@ -394,17 +419,44 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                 Value::from(1u32)
             }.boxed_local()),
         native_exec_new(
-            "__rdos_backtrace_pcinfo",
-            |flow, [state, pc, cb, error, data]| async move {
-                println!("Calling __rdos_backtrace_pcinfo({:?}, {:?}, {:?}, {:?}, {:?})", state, pc, cb, error, data);
-                let null = flow.ctx().null();
-                flow.invoke(&cb, &[&data, &pc, &null, &Value::from(0u32), &null]).await;
+            "open",
+            |flow, [path, flags]| async move {
+                println!("Calling open({:?}, {:?})", flow.get_string(&path).await, flags);
                 Value::from(0u32)
             }.boxed_local()),
+        native_exec_new("dlsym", |flow, [handle, name]| async move {
+            let name = flow.get_string(&name).await;
+            flow.ctx().lookup(EvalCtx { module: None }, &name).clone()
+        }.boxed_local()),
+        native_exec_new(
+            "__rdos_backtrace_pcinfo",
+            |flow, [state, pc, cb, error, data]| async move {
+                //println!("Calling __rdos_backtrace_pcinfo({:?}, {:?}, {:?}, {:?}, {:?})", state, pc, cb, error, data);
+                let null = flow.ctx().null();
+                let symbol = flow.ctx().reverse_lookup(&pc);
+                let fun = flow.ctx().functions.get(&symbol).unwrap();
+                let symbol_name = flow.string(&format!("{:?}", symbol)).await;
+                let debugloc = fun.debugloc();
+                let (filename, line) = if let Some(debugloc) = debugloc {
+                    (debugloc.filename.as_str(), debugloc.line)
+                } else {
+                    ("", 0)
+                };
+                let filename = flow.string(filename).await;
+                flow.invoke(&cb, &[&data, &pc, &filename, &Value::from(line), &symbol_name]).await;
+                Value::from(0u32)
+            }.boxed_local()),
+        native_exec_new("getentropy", |flow, [buf, len]| async move {
+            let data = Value::from_bytes_unaligned(&vec![4/*chosen by fair dice roll.*/; len.as_u64() as usize]);
+            flow.store(&buf, &data).await;
+            Value::from(0u32)
+        }.boxed_local()),
     ]);
     result.append(&mut overflow_binop!("uadd", "sadd", wrapping_add, checked_add));
     result.append(&mut overflow_binop!("umul", "smul", wrapping_mul, checked_mul));
     result.append(&mut overflow_binop!("usub", "ssub", wrapping_sub, checked_sub));
+    result.append(&mut unop!("cttz", trailing_zeros));
+    result.append(&mut unop!("ctlz", leading_zeros));
     result
 }
 

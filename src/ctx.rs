@@ -11,10 +11,12 @@ use crate::symbols::{SymbolTable, Symbol};
 use crate::interp::InterpFunc;
 use crate::process::Process;
 use std::rc::Rc;
+use llvm_ir::module::GlobalAlias;
+use std::borrow::Cow;
 
 pub struct Ctx<'ctx> {
     pub modules: &'ctx [Module],
-    pub functions: HashMap<Symbol<'ctx>, Rc<dyn Func<'ctx>>>,
+    pub functions: HashMap<Symbol, Rc<dyn Func<'ctx>>>,
     pub ptr_bits: u64,
     pub page_size: u64,
     symbols: SymbolTable<'ctx>,
@@ -32,13 +34,16 @@ impl<'ctx> Ctx<'ctx> {
         for (mi, module) in modules.iter().enumerate() {
             let ectx = EvalCtx { module: Some(mi) };
             for function in module.functions.iter() {
+                if function.name == "__rust_i128_shlo" {
+                    println!("{:?}", function);
+                }
                 let symbol = Symbol::new(function.linkage, mi, &function.name);
-                let compiled = Rc::new(InterpFunc::new(ectx, function));
+                let compiled = Rc::new(InterpFunc::new(ectx, symbol.clone(), function));
                 functions.insert(symbol, compiled);
             }
         }
         for native in native.into_iter() {
-            functions.insert(Symbol::External(native.name()), native);
+            functions.insert(Symbol::External(native.name().to_string()), native);
         }
         let mut ctx = Ctx {
             modules,
@@ -60,6 +65,9 @@ impl<'ctx> Ctx<'ctx> {
     pub fn array_of(&self, elem: TypeRef, num_elements: usize) -> TypeRef {
         self.modules[0].types.array_of(elem, num_elements)
     }
+    pub fn vector_of(&self, elem: TypeRef, num_elements: usize) -> TypeRef {
+        self.modules[0].types.vector_of(elem, num_elements)
+    }
     pub fn int(&self, bits: u64) -> TypeRef {
         self.modules[0].types.int(bits as u32)
     }
@@ -78,22 +86,8 @@ impl<'ctx> Ctx<'ctx> {
         self.value_from_address(0)
     }
     pub fn aggregate_zero(&self, ty: &TypeRef) -> Value {
-        match &**ty {
-            Type::ArrayType { element_type, num_elements } => {
-                let zero = self.aggregate_zero(element_type);
-                Value::aggregate((0..*num_elements).map(|_| zero.clone()), false)
-            }
-            Type::StructType { element_types, is_packed } => {
-                Value::aggregate(element_types.iter().map(|ty| self.aggregate_zero(ty)), *is_packed)
-            }
-            Type::IntegerType { bits } => {
-                Value::new(*bits as u64, 0)
-            }
-            Type::PointerType { pointee_type, addr_space } => {
-                Value::new(self.ptr_bits, 0)
-            }
-            _ => todo!("{:?}", ty)
-        }
+        let layout = self.layout(ty);
+        Value::from_bytes(&vec![0; layout.bytes() as usize], layout)
     }
     pub fn layout_of_ptr(&self) -> Layout {
         Layout::from_bits(self.ptr_bits, self.ptr_bits)
@@ -129,16 +123,28 @@ impl<'ctx> Ctx<'ctx> {
     fn initialize_globals(&mut self) {
         let func_layout = Layout::from_bytes(256, 1);
         for (symbol, fun) in self.functions.iter() {
-            self.symbols.add_symbol(&mut self.image, *symbol, func_layout);
+            self.symbols.add_symbol(&mut self.image, symbol.clone(), func_layout);
         }
         let mut inits = vec![];
         for (mi, module) in self.modules.iter().enumerate() {
             for g in module.global_vars.iter() {
-                let symbol = Symbol::new(g.linkage, mi, str_of_name(&g.name));
+                let name = str_of_name(&g.name);
+                let symbol = Symbol::new(g.linkage, mi, name);
                 let mut layout = self.layout(&self.target_of(&g.ty));
                 layout = Layout::from_bits(layout.bits(), layout.bit_align().max(8 * g.alignment as u64));
-                let loc = self.symbols.add_symbol(&mut self.image, symbol, layout);
+                let loc = self.symbols.add_symbol(&mut self.image, symbol.clone(), layout);
                 inits.push((mi, symbol, layout, g, loc));
+            }
+        }
+        for (mi, module) in self.modules.iter().enumerate() {
+            for g in module.global_aliases.iter() {
+                let name = str_of_name(&g.name);
+                let symbol = Symbol::new(g.linkage, mi, name);
+                if name == "__rust_i128_shlo" {
+                    println!("{:?} {:?}", module.name, g);
+                }
+                let (_, target) = self.get_constant(EvalCtx { module: Some(mi) }, &g.aliasee);
+                self.symbols.add_alias(symbol, target);
             }
         }
         for (mi, symbol, layout, g, loc) in inits {
@@ -211,6 +217,11 @@ impl<'ctx> Ctx<'ctx> {
             Constant::AggregateZero(typ) => {
                 (typ.clone(), self.aggregate_zero(typ))
             }
+            Constant::Vector(vec) => {
+                let elems = vec.iter().map(|c| self.get_constant(ectx, c)).collect::<Vec<_>>();
+                let ty = elems[0].0.clone();
+                (self.vector_of(ty, vec.len()), Value::aggregate(elems.into_iter().map(|(t, v)| v), false))
+            }
             x => todo!("{:?}", x),
         }
     }
@@ -262,21 +273,45 @@ impl<'ctx> Ctx<'ctx> {
                 let ty: &'a TypeRef = self.type_of_struct(name);
                 self.field(ty, index)
             }
+            Type::VectorType { element_type, num_elements } => {
+                (element_type.clone(), index * (self.layout(&element_type).bytes() as i64))
+            }
             ty => todo!("{:?}", ty),
         }
     }
-    pub fn reverse_lookup(&self, address: &Value) -> Symbol<'ctx> {
+    pub fn count<'a>(&'a self, ty: &'a Type) -> u64 {
+        match ty {
+            Type::StructType { element_types, is_packed } => {
+                element_types.len() as u64
+            }
+            Type::ArrayType { element_type, num_elements } => {
+                *num_elements as u64
+            }
+            Type::NamedStructType { name } => {
+                let ty: &'a TypeRef = self.type_of_struct(name);
+                self.count(ty)
+            }
+            Type::VectorType { element_type, num_elements } => {
+                *num_elements as u64
+            }
+            ty => todo!("{:?}", ty),
+        }
+    }
+    pub fn reverse_lookup(&self, address: &Value) -> Symbol {
         self.symbols.reverse_lookup(address)
     }
     pub fn reverse_lookup_fun(&self, address: &Value) -> Rc<dyn Func<'ctx>> {
         let name = self.reverse_lookup(address);
         self.functions.get(&name).unwrap_or_else(|| panic!("No such function {:?}", name)).clone()
     }
-    pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol<'ctx>> {
+    pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol> {
         self.symbols.try_reverse_lookup(address)
     }
-    pub fn lookup(&self, ectx: EvalCtx, name: &'ctx str) -> &Value {
+    pub fn lookup(&self, ectx: EvalCtx, name: &str) -> &Value {
         self.symbols.lookup(ectx, name)
+    }
+    pub fn lookup_symbol(&self, sym: &Symbol) -> &Value {
+        self.symbols.lookup_symbol(sym)
     }
     pub fn new_memory(&self) -> Memory<'ctx> {
         self.image.clone()

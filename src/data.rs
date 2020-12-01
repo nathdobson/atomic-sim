@@ -3,9 +3,9 @@ use crate::ctx::{Ctx};
 use crate::value::Value;
 use crate::process::Process;
 use std::fmt::{Formatter, Debug};
-use std::{fmt, mem};
+use std::{fmt, mem, iter};
 use crate::thread::{Thread, ThreadId};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet, BTreeSet};
 use std::rc::Rc;
 use std::cell::{RefCell, Ref};
 use std::borrow::BorrowMut;
@@ -15,6 +15,9 @@ use std::future::Future;
 use futures::task::{Context, Poll};
 use std::pin::Pin;
 use crate::compute::ComputeCtx;
+use std::any::type_name_of_val;
+use std::hash::{Hash, Hasher};
+use std::cmp::Ordering;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -58,6 +61,7 @@ pub struct ThunkInner<'ctx> {
     pub seq: usize,
     pub deps: Vec<Thunk<'ctx>>,
     pub address: Option<Thunk<'ctx>>,
+    pub name: String,
     pub value: RefCell<ThunkState<'ctx>>,
 }
 
@@ -98,12 +102,31 @@ impl<'ctx> Thunk<'ctx> {
         let mut r = self.0.value.borrow_mut();
         match mem::replace(&mut *r, ThunkState::Sandbag) {
             ThunkState::Pending(compute) => {
-                *r = ThunkState::Ready(compute(comp, args.as_slice()));
+                let v = compute(comp, args.as_slice());
+                *r = ThunkState::Ready(v);
+                mem::drop(r);
+                //println!("{:?} = {:?} ({:?})[{:?}]", self.0.seq, *r, args, self.0.deps.iter().map(|x| x.0.seq));
+                println!("{:?}", self);
             }
             ThunkState::Ready(_) => panic!("Stepping ready thunk."),
             _ => unreachable!(),
         }
         true
+    }
+    pub fn all_deps(&self) -> Vec<&Thunk<'ctx>> {
+        let mut frontier: Vec<&Thunk> = vec![self];
+        let mut all = BTreeSet::new();
+        while let Some(next) = frontier.pop() {
+            if all.insert(next) {
+                for dep in next.0.deps.iter() {
+                    frontier.push(dep)
+                }
+            }
+        }
+        all.into_iter().collect()
+    }
+    pub fn full_debug(&self) -> String {
+        format!("{:#?}", self.all_deps())
     }
 }
 
@@ -113,7 +136,7 @@ impl<'ctx> DataFlow<'ctx> {
             inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
         }
     }
-    pub async fn thunk(&self, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value) -> Thunk<'ctx> {
+    pub async fn thunk(&self, name: String, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value) -> Thunk<'ctx> {
         while self.inner.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
@@ -125,33 +148,37 @@ impl<'ctx> DataFlow<'ctx> {
             seq,
             deps,
             address: None,
+            name,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
         this.thunks.insert(seq, thunk.clone());
         thunk
     }
     pub async fn constant(&self, v: Value) -> Thunk<'ctx> {
-        self.thunk(vec![], |_, _| v).await
+        self.thunk("constant".to_string(), vec![], |_, _| v).await
     }
     pub async fn store<'a>(&'a self, address: Thunk<'ctx>, value: Thunk<'ctx>, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
-        self.thunk(vec![address, value], move |comp, args| {
+        self.thunk("store".to_string(), vec![address, value], move |comp, args| {
             comp.process.store(comp.threadid, args[0], args[1], atomicity);
             Value::from(())
         }).await
     }
     pub async fn load<'a>(&'a self, address: Thunk<'ctx>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
-        self.thunk(vec![address], move |comp, args| {
+        self.thunk("load".to_string(), vec![address], move |comp, args| {
             comp.process.load(comp.threadid, args[0], layout, atomicity)
         }).await
     }
     pub fn len(&self) -> usize {
         self.inner.borrow().thunks.len()
     }
+    pub fn seq(&self) -> usize {
+        self.inner.borrow().seq
+    }
     pub fn step(&self, threadid: ThreadId) -> impl FnOnce(&mut Process<'ctx>) -> bool {
         let thunk = self.inner.borrow_mut().thunks.pop_first();
         move |process| {
             if let Some((_, thunk)) = thunk {
-                thunk.step(ComputeCtx{ process: process, threadid });
+                thunk.step(ComputeCtx { process: process, threadid });
                 true
             } else {
                 false
@@ -187,16 +214,16 @@ impl<'a> Debug for DebugDeps<'a> {
 
 impl<'ctx> Debug for Thunk<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}_{} = {:?} [{:?}]", self.0.threadid, self.0.seq, self.0.value.borrow(), self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>())
+        write!(f, "{:?}_{} = {} {:?} [{:?}]", self.0.threadid, self.0.seq, self.0.name, self.0.value.borrow(), self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>())
     }
 }
 
 impl<'ctx> Debug for ThunkState<'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ThunkState::Pending(_) => write!(f, "ThunkState::Pending"),
-            ThunkState::Ready(value) => write!(f, "ThunkState::Ready({:?})", value),
-            ThunkState::Sandbag => write!(f, "ThunkState::Pending"),
+            ThunkState::Pending(_) => write!(f, "Pending"),
+            ThunkState::Ready(value) => write!(f, "{:?}", value),
+            ThunkState::Sandbag => write!(f, "Sandbag"),
             _ => todo!(),
         }
     }
@@ -213,3 +240,30 @@ impl<'ctx> Future for Thunk<'ctx> {
         }
     }
 }
+
+impl<'ctx> Hash for Thunk<'ctx> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.seq.hash(state);
+    }
+}
+
+impl<'ctx> Eq for Thunk<'ctx> {}
+
+impl<'ctx> PartialEq for Thunk<'ctx> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.seq == other.0.seq
+    }
+}
+
+impl<'ctx> Ord for Thunk<'ctx> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.seq.cmp(&other.0.seq)
+    }
+}
+
+impl<'ctx> PartialOrd for Thunk<'ctx> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.seq.partial_cmp(&other.0.seq)
+    }
+}
+

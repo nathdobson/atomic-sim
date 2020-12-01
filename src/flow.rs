@@ -4,6 +4,8 @@ use crate::data::DataFlow;
 use crate::backtrace::{Backtrace, BacktraceFrame};
 use crate::value::Value;
 use crate::layout::Layout;
+use std::fmt::{Debug, Formatter};
+use std::fmt;
 
 pub struct FlowCtx<'ctx, 'flow> {
     ctx: &'flow Rc<Ctx<'ctx>>,
@@ -24,7 +26,7 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
             thunks.push(self.data.constant((*farg).clone()).await);
         }
         self.ctx.reverse_lookup_fun(&fun)
-            .call_imp(&self.with_frame(BacktraceFrame { name: "<native>" }), &thunks).await.await
+            .call_imp(&self.with_frame(BacktraceFrame { ip: 0xFFFF_FFFF, ..BacktraceFrame::default() }), &thunks).await.await
     }
 
     pub fn with_frame(&self, frame: BacktraceFrame<'ctx>) -> Self {
@@ -33,6 +35,12 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
             data: self.data,
             backtrace: self.backtrace.prepend(frame),
         }
+    }
+
+    pub async fn alloc(&self, layout: Layout) -> Value {
+        self.data.thunk(format!("alloc({:?})", layout), vec![], move |comp, _| {
+            comp.process.alloc(comp.threadid, layout)
+        }).await.await
     }
 
     pub async fn load(&self, address: &Value, layout: Layout) -> Value {
@@ -45,6 +53,34 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
                         None).await.await;
     }
 
+    pub async fn string(&self, string: &str) -> Value {
+        let mut cstr = string.as_bytes().to_vec();
+        cstr.push(0);
+        let layout = Layout::from_bytes(cstr.len() as u64, 1);
+        let res = self.alloc(layout).await;
+        self.store(&res, &Value::from_bytes(&cstr, layout)).await;
+        res
+    }
+
+    pub async fn strlen(&self, string: &Value) -> Value {
+        for i in 0.. {
+            let ptr = self.ctx().value_from_address(string.as_u64() + i);
+            let v = self.load(&ptr, Layout::from_bytes(1, 1)).await;
+            if v.unwrap_u8() as u32 == 0 {
+                return self.ctx().value_from_address(i);
+            }
+        }
+        panic!()
+    }
+
+    pub async fn get_string(&self, string: &Value) -> String {
+        let len = self.strlen(string).await;
+        String::from_utf8(
+            self.load(string,
+                      Layout::from_bytes(len.as_u64(), 1)).await.bytes().to_vec()).unwrap()
+    }
+
+
     pub fn ctx(&self) -> &'flow Rc<Ctx<'ctx>> {
         self.ctx
     }
@@ -53,5 +89,15 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
     }
     pub fn backtrace(&self) -> &Backtrace<'ctx> {
         &self.backtrace
+    }
+}
+
+
+impl<'ctx, 'flow> Debug for FlowCtx<'ctx, 'flow> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for frame in self.backtrace.iter() {
+            write!(f, "{:?}\n", self.ctx.reverse_lookup(&self.ctx.value_from_address(frame.ip)))?;
+        }
+        Ok(())
     }
 }

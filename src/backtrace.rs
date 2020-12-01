@@ -1,6 +1,8 @@
 use std::rc::Rc;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
+use crate::value::Value;
+use std::marker::PhantomData;
 
 #[derive(Clone)]
 pub enum Backtrace<'ctx> {
@@ -11,9 +13,11 @@ pub enum Backtrace<'ctx> {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct BacktraceFrame<'ctx> {
-    pub name: &'ctx str,
+    //pub name: &'ctx str,
+    pub ip: u64,
+    pub phantom: PhantomData<&'ctx ()>,
 }
 
 pub struct Iter<'ctx, 'bt> {

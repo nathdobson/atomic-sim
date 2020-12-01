@@ -13,6 +13,7 @@ use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
+use llvm_ir::DebugLoc;
 
 // pub struct ExecArgs<'ctx, 'exec> {
 //     pub ctx: &'exec Rc<Ctx<'ctx>>,
@@ -24,6 +25,7 @@ use crate::flow::FlowCtx;
 pub trait Func<'ctx>: 'ctx {
     fn name(&self) -> &'ctx str;
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>>;
+    fn debugloc(&self) -> Option<&'ctx DebugLoc> { None }
 }
 
 impl<'ctx> Debug for dyn 'ctx + Func<'ctx> {

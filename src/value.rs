@@ -32,6 +32,7 @@ impl Value {
             16 => self.unwrap_i16() as i128,
             32 => self.unwrap_i32() as i128,
             64 => self.unwrap_i64() as i128,
+            128 => self.unwrap_i128() as i128,
             b => todo!("{:?}", b),
         }
     }
@@ -127,6 +128,14 @@ impl Value {
         let mask = (1u128 << bits) - 1;
         let result = Self::new(bits, self.as_u128() & mask);
         result
+    }
+    pub fn insert(&mut self, offset: i64, element: &Value) {
+        let offset = offset as usize;
+        let element = element.bytes();
+        self.bytes_mut()[offset..offset + element.len()].copy_from_slice(element);
+    }
+    pub fn extract(&self, offset: i64, layout: Layout) -> Value {
+        Value::from_bytes(&self.bytes()[offset as usize..offset as usize + layout.bytes() as usize], layout)
     }
 }
 
@@ -367,7 +376,7 @@ impl Debug for Value {
 }
 
 
-impl Default for Value{
+impl Default for Value {
     fn default() -> Self {
         Value::from(())
     }
