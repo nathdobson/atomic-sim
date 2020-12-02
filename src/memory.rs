@@ -92,7 +92,7 @@ impl<'ctx> Memory<'ctx> {
         let mut bytes = vec![0u8; layout.bytes() as usize];
         let mut missing = (0..layout.bytes()).collect::<HashSet<_>>();
         let alloc = self.find_alloc(ptr, layout);
-        //assert!(alloc.ptr <= ptr.as_u64() && ptr.as_u64() + layout.bytes() <= alloc.ptr + alloc.len, "load overflow at {:?} length {:?} region {:?}", ptr, layout.bytes(), alloc);
+        assert!(alloc.ptr <= ptr.as_u64() && ptr.as_u64() + layout.bytes() <= alloc.ptr + alloc.len, "load overflow at {:?} length {:?} region {:?}", ptr, layout.bytes(), alloc);
         println!("Loading {:?}[{:?}] from {:?}", ptr, layout, alloc);
         for store in alloc.stores.iter().rev() {
             let ptr = ptr.as_u64();

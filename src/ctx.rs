@@ -316,6 +316,11 @@ impl<'ctx> Ctx<'ctx> {
     pub fn new_memory(&self) -> Memory<'ctx> {
         self.image.clone()
     }
+    pub fn extract_value(&self, ty: &TypeRef, v: &Value, indices: impl Iterator<Item=i64>) -> Value {
+        let (ty2, offset) = self.offset_of(&ty, indices);
+        let layout = self.layout(&ty2);
+        v.extract(offset, layout)
+    }
 }
 
 

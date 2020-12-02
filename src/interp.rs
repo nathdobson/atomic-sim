@@ -1,4 +1,4 @@
-use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand, DebugLoc, Type, HasDebugLoc};
+use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand, DebugLoc, Type, HasDebugLoc, TypeRef};
 use std::collections::HashMap;
 use crate::ctx::{EvalCtx, Ctx};
 use crate::function::{Func};
@@ -17,6 +17,7 @@ use crate::flow::FlowCtx;
 use crate::compute::ComputeCtx;
 use crate::symbols::Symbol;
 use crate::layout::{AggrLayout, Layout};
+use crate::arith::{BinOp, UnOp};
 
 #[derive(Debug)]
 pub struct InterpFunc<'ctx> {
@@ -175,8 +176,10 @@ impl<'ctx> InterpFrame<'ctx> {
             => {
                 let deps = vec![self.get_temp(flow, operand0).await, self.get_temp(flow, operand1).await];
                 let ctx = flow.ctx().clone();
+                let ty1 = flow.ctx().type_of(self.ectx, operand0);
+                let ty2 = flow.ctx().type_of(self.ectx, operand1);
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args|
-                    Self::binary(&*ctx, instr, args[0], args[1])).await;
+                    Self::binary(&*ctx, instr, &ty1, args[0], &ty2, args[1])).await;
             }
             Instruction::SExt(SExt { dest, operand, .. }) |
             Instruction::ZExt(ZExt { dest, operand, .. }) |
@@ -186,9 +189,10 @@ impl<'ctx> InterpFrame<'ctx> {
             Instruction::BitCast(BitCast { dest, operand, .. }) => {
                 let deps = vec![self.get_temp(flow, operand).await];
                 let ctx = flow.ctx().clone();
+                let ty = flow.ctx().type_of(self.ectx, operand);
                 self.add_thunk(flow, name, Some(dest), deps,
                                move |comp, args|
-                                   Self::unary(&*ctx, instr, args[0])).await;
+                                   Self::unary(&*ctx, instr, &ty, args[0])).await;
             }
             Instruction::GetElementPtr(gep) => {
                 let mut deps = vec![self.get_temp(flow, &gep.address).await];
@@ -236,15 +240,16 @@ impl<'ctx> InterpFrame<'ctx> {
 
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
                     let current = comp.process.load(comp.threadid, args[0], layout, Some(atomicity)).clone();
+
                     let new = match operation {
-                        RMWBinOp::Add => &current + args[1],
-                        RMWBinOp::Sub => &current - args[1],
-                        RMWBinOp::Xchg => args[1].clone(),
-                        RMWBinOp::And => &current & args[1],
-                        RMWBinOp::Or => &current | args[1],
-                        RMWBinOp::Xor => &current ^ args[1],
+                        RMWBinOp::Add => BinOp::Add,
+                        RMWBinOp::Sub => BinOp::Sub,
+                        RMWBinOp::Xchg => BinOp::Xchg,
+                        RMWBinOp::And => BinOp::And,
+                        RMWBinOp::Or => BinOp::Or,
+                        RMWBinOp::Xor => BinOp::Xor,
                         _ => todo!("{:?}", operation),
-                    };
+                    }.call(comp.ctx(), &ty, &current, &ty, args[1]);
                     comp.process.store(comp.threadid, args[0], &new, Some(atomicity));
                     current
                 }).await;
@@ -265,12 +270,8 @@ impl<'ctx> InterpFrame<'ctx> {
             Instruction::ExtractValue(ExtractValue { aggregate, dest, indices, .. }) => {
                 let deps = vec![self.get_temp(flow, aggregate).await];
                 let ty = flow.ctx().type_of(self.ectx, aggregate);
-                let (ty2, offset) = flow.ctx().offset_of(&ty, indices.iter().map(|i| *i as i64));
-                let layout = flow.ctx().layout(&ty2);
-                let offset = offset as usize;
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
-                    let bytes = &args[0].bytes()[offset..offset + layout.bytes() as usize];
-                    Value::from_bytes(bytes, layout)
+                    comp.ctx().extract_value(&ty, args[0], indices.iter().map(|x| *x as i64))
                 }).await;
             }
             Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, atomicity, .. }) => {
@@ -334,44 +335,38 @@ impl<'ctx> InterpFrame<'ctx> {
             _ => todo!("{:?}", instr),
         }
     }
-    fn unary(ctx: &Ctx<'ctx>, instr: &Instruction, value: &Value) -> Value {
-        match instr {
+    fn unary(ctx: &Ctx<'ctx>, instr: &Instruction, ty: &TypeRef, value: &Value) -> Value {
+        let (op, to) = match instr {
             Instruction::SExt(SExt { to_type, .. }) =>
-                value.sext(ctx.layout(to_type).bits()),
-            Instruction::ZExt(ZExt { to_type, .. }) =>
-                value.zext(ctx.layout(to_type).bits()),
+                (UnOp::Scast, to_type),
+            Instruction::ZExt(ZExt { to_type, .. }) |
             Instruction::Trunc(Trunc { to_type, .. }) |
             Instruction::PtrToInt(PtrToInt { to_type, .. }) |
             Instruction::IntToPtr(IntToPtr { to_type, .. }) |
-            Instruction::BitCast(BitCast { to_type, .. }) => {
-                let to_bits = ctx.layout(to_type).bits();
-                if to_bits < value.bits() {
-                    value.truncate(to_bits)
-                } else {
-                    value.zext(to_bits)
-                }
-            }
+            Instruction::BitCast(BitCast { to_type, .. }) =>
+                (UnOp::Ucast, to_type),
             _ => unreachable!()
-        }
+        };
+        op.call(ctx, ty, value, to)
     }
-    fn binary(ctx: &Ctx<'ctx>, instr: &Instruction, x: &Value, y: &Value) -> Value {
+    fn binary(ctx: &Ctx<'ctx>, instr: &Instruction, ty1: &TypeRef, x: &Value, ty2: &TypeRef, y: &Value) -> Value {
         match instr {
-            Instruction::Add(Add { .. }) => x + y,
-            Instruction::Sub(Sub { .. }) => x - y,
-            Instruction::Mul(Mul { .. }) => x * y,
-            Instruction::UDiv(UDiv { .. }) => x / y,
-            Instruction::SDiv(SDiv { .. }) => x.sdiv(y),
-            Instruction::URem(URem { .. }) => x % y,
-            Instruction::SRem(SRem { .. }) => x.srem(y),
-            Instruction::Xor(Xor { .. }) => x ^ y,
-            Instruction::And(And { .. }) => x & y,
-            Instruction::Or(Or { .. }) => x | y,
-            Instruction::Shl(Shl { .. }) => x << y,
-            Instruction::LShr(LShr { .. }) => x >> y,
-            Instruction::AShr(AShr { .. }) => x.sshr(y),
-            Instruction::ICmp(ICmp { predicate, .. }) => Value::from(Self::icmp(predicate, x, y)),
+            Instruction::Add(Add { .. }) => BinOp::Add,
+            Instruction::Sub(Sub { .. }) => BinOp::Sub,
+            Instruction::Mul(Mul { .. }) => BinOp::Mul,
+            Instruction::UDiv(UDiv { .. }) => BinOp::UDiv,
+            Instruction::SDiv(SDiv { .. }) => BinOp::SDiv,
+            Instruction::URem(URem { .. }) => BinOp::URem,
+            Instruction::SRem(SRem { .. }) => BinOp::SRem,
+            Instruction::Xor(Xor { .. }) => BinOp::Xor,
+            Instruction::And(And { .. }) => BinOp::And,
+            Instruction::Or(Or { .. }) => BinOp::Or,
+            Instruction::Shl(Shl { .. }) => BinOp::Shl,
+            Instruction::LShr(LShr { .. }) => BinOp::LShr,
+            Instruction::AShr(AShr { .. }) => BinOp::AShr,
+            Instruction::ICmp(ICmp { predicate, .. }) => BinOp::ICmp(*predicate),
             _ => todo!(),
-        }
+        }.call(ctx, ty1, x, ty2, y)
     }
     fn icmp(predicate: &IntPredicate, x: &Value, y: &Value) -> bool {
         println!("{:?} {:?} {:?}", x, predicate, y);

@@ -1,6 +1,8 @@
 use std::iter::FromIterator;
+use std::fmt::{Debug, Formatter};
+use std::fmt;
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Layout { bits: u64, bit_align: u64 }
 
 pub fn align_to(ptr: u64, align: u64) -> u64 {
@@ -73,5 +75,11 @@ impl AggrLayout {
     }
     pub fn bit_offset(&self, offset: usize) -> u64 {
         self.bit_offsets[offset]
+    }
+}
+
+impl Debug for Layout {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "b{}%{}", self.bits, self.bit_align)
     }
 }

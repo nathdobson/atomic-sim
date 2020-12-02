@@ -3,6 +3,7 @@
 #![feature(cell_leak)]
 #![feature(const_generics)]
 #![feature(type_name_of_val)]
+#![feature(or_patterns)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case)]
 #![deny(unused_must_use)]
 
@@ -34,6 +35,7 @@ mod interp;
 mod backtrace;
 mod flow;
 mod compute;
+mod arith;
 
 pub fn main() {
     let mut modules = vec![];

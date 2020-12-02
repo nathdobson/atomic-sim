@@ -4,13 +4,13 @@ use std::collections::{HashMap, BTreeSet};
 
 #[inline(never)]
 fn foo() -> u32 {
-    let mut hashmap = HashMap::new();
+    let mut hashmap = HashMap::<u32,u32>::new();
     hashmap.insert(1, 1);
     hashmap.len() as u32
 }
 
 fn main() {
-    //format!("{}{}", 1, 2);
+    // format!("{}{}", 1, 2);
     // let foo: HashMap<&str, &str> = [("a", "1"), ("b", "2")].iter().cloned().collect();
     // for x in foo {
     //     println!("XXXX{:?}", x);
