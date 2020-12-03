@@ -48,6 +48,9 @@ pub fn main() {
         }
     }
     let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
+    for (mi, module) in modules.iter().enumerate() {
+        println!("{} {:?}",mi, module.name);
+    }
     let modules = &modules;
     let native = native::builtins();
     let ctx = Rc::new(Ctx::new(modules, native));

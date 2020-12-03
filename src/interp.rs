@@ -17,7 +17,7 @@ use crate::flow::FlowCtx;
 use crate::compute::ComputeCtx;
 use crate::symbols::Symbol;
 use crate::layout::{AggrLayout, Layout, Packing};
-use crate::arith::{BinOp, UnOp};
+use crate::arith::{BinOp, scast, ucast};
 
 #[derive(Debug)]
 pub struct InterpFunc<'ctx> {
@@ -102,7 +102,21 @@ impl<'ctx> InterpFrame<'ctx> {
     pub async fn decode_impl(&mut self, flow: &FlowCtx<'ctx, '_>) -> Thunk<'ctx> {
         let mut block = self.fun.basic_blocks.get(0).unwrap();
         loop {
-            for instr in block.instrs.iter() {
+            let mut iter = block.instrs.iter().peekable();
+            let mut phis = vec![];
+            while let Some(Instruction::Phi(phi)) = iter.peek() {
+                iter.next();
+                let (oper, _) =
+                    phi.incoming_values.iter()
+                        .find(|(_, name)| Some(name) == self.origin)
+                        .unwrap_or_else(|| panic!("No target {:?} in {:?}", self.origin, self.fun.name));
+                let deps = vec![self.get_temp(&flow, oper).await];
+                phis.push((phi, deps));
+            }
+            for (phi, deps) in phis {
+                self.add_thunk(flow, format!("{}", phi), Some(&phi.dest), deps, |comp, args| args[0].clone()).await;
+            }
+            for instr in iter {
                 self.decode_instr(&flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }), instr).await;
             }
             match self.decode_term(&flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }), &block.term).await {
@@ -117,14 +131,6 @@ impl<'ctx> InterpFrame<'ctx> {
     async fn decode_instr<'a>(&'a mut self, flow: &'a FlowCtx<'ctx, '_>, instr: &'ctx Instruction) {
         let name = format!("{} {:?}", instr, instr.get_debug_loc());
         match instr {
-            Instruction::Phi(phi) => {
-                let (oper, _) =
-                    phi.incoming_values.iter()
-                        .find(|(_, name)| Some(name) == self.origin)
-                        .unwrap_or_else(|| panic!("No target {:?} in {:?}", self.origin, self.fun.name));
-                let deps = vec![self.get_temp(&flow, oper).await];
-                self.add_thunk(flow, name, Some(&phi.dest), deps, |comp, args| args[0].clone()).await;
-            }
             Instruction::Call(call) => {
                 self.decode_call(flow, &call.function, &call.arguments, call.dest.as_ref()).await;
             }
@@ -204,9 +210,9 @@ impl<'ctx> InterpFrame<'ctx> {
                 let ctx = flow.ctx().clone();
                 self.add_thunk(flow, name, Some(&gep.dest), deps, move |comp, args| {
                     let (_, offset) = ctx.offset_bit(&ty,
-                                                    args[1..].iter().map(|v| v.as_i64()));
-                    assert_eq!(offset%8,0);
-                    ctx.value_from_address(add_u64_i64(args[0].as_u64(), offset/8))
+                                                     args[1..].iter().map(|v| v.as_i64()));
+                    assert_eq!(offset % 8, 0);
+                    ctx.value_from_address(add_u64_i64(args[0].as_u64(), offset / 8))
                 }).await;
             }
             Instruction::InsertElement(InsertElement { vector, element, index, dest, .. }) => {
@@ -332,18 +338,17 @@ impl<'ctx> InterpFrame<'ctx> {
         }
     }
     fn unary(ctx: &Ctx<'ctx>, instr: &Instruction, ty: &TypeRef, value: &Value) -> Value {
-        let (op, to) = match instr {
+        match instr {
             Instruction::SExt(SExt { to_type, .. }) =>
-                (UnOp::Scast, to_type),
+                scast(ctx, ty, value, to_type),
             Instruction::ZExt(ZExt { to_type, .. }) |
             Instruction::Trunc(Trunc { to_type, .. }) |
             Instruction::PtrToInt(PtrToInt { to_type, .. }) |
             Instruction::IntToPtr(IntToPtr { to_type, .. }) |
             Instruction::BitCast(BitCast { to_type, .. }) =>
-                (UnOp::Ucast, to_type),
+                ucast(ctx, ty, value, to_type),
             _ => unreachable!()
-        };
-        op.call(ctx, ty, value, to)
+        }
     }
     fn binary(ctx: &Ctx<'ctx>, instr: &Instruction, ty1: &TypeRef, x: &Value, ty2: &TypeRef, y: &Value) -> Value {
         match instr {

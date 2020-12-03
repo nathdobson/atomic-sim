@@ -72,15 +72,6 @@ pub struct ThunkInner<'ctx> {
 pub struct Thunk<'ctx>(Rc<ThunkInner<'ctx>>);
 
 impl<'ctx> Thunk<'ctx> {
-    // pub async fn get(&self) -> &Value {
-    //     loop {
-    //         if let Some(v) = self.try_get() {
-    //             return v;
-    //         } else {
-    //             pending!();
-    //         }
-    //     }
-    // }
     pub fn try_get(&self) -> Option<&Value> {
         let r = self.0.value.borrow();
         match &*r {

@@ -24,12 +24,6 @@ pub enum BinOp {
     Xchg,
 }
 
-#[derive(Debug)]
-pub enum UnOp {
-    Scast,
-    Ucast,
-}
-
 macro_rules! repeat5 {
     ($x:expr)=>(($x,$x,$x,$x,$x))
 }
@@ -127,46 +121,38 @@ impl BinOp {
     }
 }
 
-impl UnOp {
-    pub fn call<'ctx>(&self, ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
-        match self {
-            UnOp::Scast => Self::scast(ctx, ty1, v1, ty2),
-            UnOp::Ucast => Self::ucast(ctx, ty1, v1, ty2),
+pub fn ucast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
+    v1.ucast(ctx.layout(ty2))
+}
+pub fn scast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
+    match (&**ty1, &**ty2) {
+        (Type::IntegerType { .. } | Type::PointerType { .. },
+            Type::IntegerType { .. } | Type::PointerType { .. })
+        => {
+            scast_scalar(v1, ctx.layout(ty2))
         }
-    }
-    pub fn ucast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
-        v1.ucast(ctx.layout(ty2))
-    }
-    pub fn scast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
-        match (&**ty1, &**ty2) {
-            (Type::IntegerType { .. } | Type::PointerType { .. },
-                Type::IntegerType { .. } | Type::PointerType { .. })
-            => {
-                Self::scast_scalar(v1, ctx.layout(ty2))
-            }
 
-            (Type::VectorType { element_type: e1, num_elements: n1 },
-                Type::VectorType { element_type: e2, num_elements: n2 }) => {
-                assert_eq!(n1, n2);
-                Value::aggregate((0..*n1).map(|i| {
-                    Self::scast(ctx,
-                                e1, &ctx.extract_value(ty1, v1, iter::once(i as i64)),
-                                e2)
-                }), Packing::Bit)
-            }
-            _ => todo!("{:?} {:?}", ty1, ty2),
+        (Type::VectorType { element_type: e1, num_elements: n1 },
+            Type::VectorType { element_type: e2, num_elements: n2 }) => {
+            assert_eq!(n1, n2);
+            Value::aggregate((0..*n1).map(|i| {
+                scast(ctx,
+                            e1, &ctx.extract_value(ty1, v1, iter::once(i as i64)),
+                            e2)
+            }), Packing::Bit)
         }
+        _ => todo!("{:?} {:?}", ty1, ty2),
     }
-    pub fn scast_scalar(v1: &Value, layout: Layout) -> Value {
-        match (v1.bits(), layout.bits()) {
-            (x, y) if x == y => v1.clone(),
-            (8, 16) => Value::from(v1.unwrap_i8() as i16),
-            (8, 32) => Value::from(v1.unwrap_i8() as i32),
-            (8, 64) => Value::from(v1.unwrap_i8() as i64),
-            (16, 32) => Value::from(v1.unwrap_i16() as i32),
-            (16, 64) => Value::from(v1.unwrap_i16() as i64),
-            (32, 64) => Value::from(v1.unwrap_i32() as i64),
-            bits => todo!("{:?}", bits),
-        }
+}
+pub fn scast_scalar(v1: &Value, layout: Layout) -> Value {
+    match (v1.bits(), layout.bits()) {
+        (x, y) if x == y => v1.clone(),
+        (8, 16) => Value::from(v1.unwrap_i8() as i16),
+        (8, 32) => Value::from(v1.unwrap_i8() as i32),
+        (8, 64) => Value::from(v1.unwrap_i8() as i64),
+        (16, 32) => Value::from(v1.unwrap_i16() as i32),
+        (16, 64) => Value::from(v1.unwrap_i16() as i64),
+        (32, 64) => Value::from(v1.unwrap_i32() as i64),
+        bits => todo!("{:?}", bits),
     }
 }
