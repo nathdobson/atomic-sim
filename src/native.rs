@@ -31,7 +31,7 @@ impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
 
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
         let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(self.name.to_string(), args.to_vec(),
+        Box::pin(flow.data().thunk(self.name.to_string(), flow.backtrace().clone(), args.to_vec(),
                                    move |comp: ComputeCtx<'ctx, '_>, args| {
                                        imp(comp, args)
                                    }))
@@ -50,7 +50,7 @@ impl<'ctx> Func<'ctx> for NativeExec<'ctx> {
             for arg in args {
                 values.push(arg.clone().await);
             }
-            flow.data().constant((self.imp)(flow, &values).await).await
+            flow.data().constant(flow.backtrace().clone(), (self.imp)(flow, &values).await).await
         })
     }
 }
@@ -293,8 +293,8 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                                None);
             Value::from(())
         }),
-        native_comp_new("llvm.fshl.i64", |comp, [a,b,s]| {
-            Value::from((((a.as_u128()<<64 |b.as_u128())<<s.as_u128())>>64) as u64)
+        native_comp_new("llvm.fshl.i64", |comp, [a, b, s]| {
+            Value::from((((a.as_u128() << 64 | b.as_u128()) << s.as_u128()) >> 64) as u64)
         }),
         native_comp_new("sigaction", |comp, [signum, act, oldact]| {
             Value::from(0u32)

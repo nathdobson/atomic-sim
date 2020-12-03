@@ -34,9 +34,6 @@ impl<'ctx> Ctx<'ctx> {
         for (mi, module) in modules.iter().enumerate() {
             let ectx = EvalCtx { module: Some(mi) };
             for function in module.functions.iter() {
-                if function.name == "__rust_i128_shlo" {
-                    println!("{:?}", function);
-                }
                 let symbol = Symbol::new(function.linkage, mi, &function.name);
                 let compiled = Rc::new(InterpFunc::new(ectx, symbol.clone(), function));
                 functions.insert(symbol, compiled);
@@ -140,9 +137,6 @@ impl<'ctx> Ctx<'ctx> {
             for g in module.global_aliases.iter() {
                 let name = str_of_name(&g.name);
                 let symbol = Symbol::new(g.linkage, mi, name);
-                if name == "__rust_i128_shlo" {
-                    println!("{:?} {:?}", module.name, g);
-                }
                 let (_, target) = self.get_constant(EvalCtx { module: Some(mi) }, &g.aliasee);
                 self.symbols.add_alias(symbol, target);
             }

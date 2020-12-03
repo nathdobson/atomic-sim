@@ -12,4 +12,5 @@ rand = "0.7.3"
 rayon = "1.5.0"
 libc = "0.2.80"
 futures = "0.3.8"
+defer = "0.1.0"
 

@@ -23,7 +23,7 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
     pub async fn invoke(&self, fun: &'flow Value, fargs: &[&Value]) -> Value {
         let mut thunks = Vec::with_capacity(fargs.len());
         for farg in fargs.iter() {
-            thunks.push(self.data.constant((*farg).clone()).await);
+            thunks.push(self.data.constant(self.backtrace.clone(), (*farg).clone()).await);
         }
         self.ctx.reverse_lookup_fun(&fun)
             .call_imp(&self.with_frame(BacktraceFrame { ip: 0xFFFF_FFFF, ..BacktraceFrame::default() }), &thunks).await.await
@@ -38,18 +38,20 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
     }
 
     pub async fn alloc(&self, layout: Layout) -> Value {
-        self.data.thunk(format!("alloc({:?})", layout), vec![], move |comp, _| {
+        self.data.thunk(format!("alloc({:?})", layout), self.backtrace.clone(), vec![], move |comp, _| {
             comp.process.alloc(comp.threadid, layout)
         }).await.await
     }
 
     pub async fn load(&self, address: &Value, layout: Layout) -> Value {
-        self.data.load(self.data.constant(address.clone()).await, layout, None).await.await
+        self.data.load(self.backtrace.clone(),
+                       self.data.constant(self.backtrace.clone(),
+                                          address.clone()).await, layout, None).await.await
     }
 
     pub async fn store(&self, address: &Value, value: &Value) {
-        self.data.store(self.data.constant(address.clone()).await,
-                        self.data.constant(value.clone()).await,
+        self.data.store(self.backtrace.clone(),self.data.constant(self.backtrace.clone(),address.clone()).await,
+                        self.data.constant(self.backtrace.clone(),value.clone()).await,
                         None).await.await;
     }
 

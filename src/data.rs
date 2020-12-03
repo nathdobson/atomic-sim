@@ -3,7 +3,7 @@ use crate::ctx::{Ctx};
 use crate::value::Value;
 use crate::process::Process;
 use std::fmt::{Formatter, Debug};
-use std::{fmt, mem, iter};
+use std::{fmt, mem, iter, thread};
 use crate::thread::{Thread, ThreadId};
 use std::collections::{HashMap, BTreeMap, HashSet, BTreeSet};
 use std::rc::Rc;
@@ -18,6 +18,8 @@ use crate::compute::ComputeCtx;
 use std::any::type_name_of_val;
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
+use crate::backtrace::Backtrace;
+use defer::defer;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -62,6 +64,7 @@ pub struct ThunkInner<'ctx> {
     pub deps: Vec<Thunk<'ctx>>,
     pub address: Option<Thunk<'ctx>>,
     pub name: String,
+    pub backtrace: Backtrace<'ctx>,
     pub value: RefCell<ThunkState<'ctx>>,
 }
 
@@ -125,8 +128,11 @@ impl<'ctx> Thunk<'ctx> {
         }
         all.into_iter().collect()
     }
-    pub fn full_debug(&self) -> String {
-        format!("{:#?}", self.all_deps())
+    pub fn backtrace(&self) -> &Backtrace<'ctx> {
+        &self.0.backtrace
+    }
+    pub fn full_debug(&self, ctx: &Ctx<'ctx>) -> (Vec<&Thunk<'ctx>>, impl Debug + 'ctx) {
+        (self.all_deps(), self.backtrace().full_debug(ctx))
     }
 }
 
@@ -136,7 +142,7 @@ impl<'ctx> DataFlow<'ctx> {
             inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
         }
     }
-    pub async fn thunk(&self, name: String, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value) -> Thunk<'ctx> {
+    pub async fn thunk(&self, name: String, backtrace: Backtrace<'ctx>, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value) -> Thunk<'ctx> {
         while self.inner.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
@@ -149,22 +155,23 @@ impl<'ctx> DataFlow<'ctx> {
             deps,
             address: None,
             name,
+            backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
         this.thunks.insert(seq, thunk.clone());
         thunk
     }
-    pub async fn constant(&self, v: Value) -> Thunk<'ctx> {
-        self.thunk("constant".to_string(), vec![], |_, _| v).await
+    pub async fn constant(&self, backtrace: Backtrace<'ctx>, v: Value) -> Thunk<'ctx> {
+        self.thunk("constant".to_string(), backtrace, vec![], |_, _| v).await
     }
-    pub async fn store<'a>(&'a self, address: Thunk<'ctx>, value: Thunk<'ctx>, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
-        self.thunk("store".to_string(), vec![address, value], move |comp, args| {
+    pub async fn store<'a>(&'a self, backtrace: Backtrace<'ctx>, address: Thunk<'ctx>, value: Thunk<'ctx>, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+        self.thunk("store".to_string(), backtrace, vec![address, value], move |comp, args| {
             comp.process.store(comp.threadid, args[0], args[1], atomicity);
             Value::from(())
         }).await
     }
-    pub async fn load<'a>(&'a self, address: Thunk<'ctx>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
-        self.thunk("load".to_string(), vec![address], move |comp, args| {
+    pub async fn load<'a>(&'a self, backtrace: Backtrace<'ctx>, address: Thunk<'ctx>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+        self.thunk("load".to_string(), backtrace, vec![address], move |comp, args| {
             comp.process.load(comp.threadid, args[0], layout, atomicity)
         }).await
     }
@@ -178,6 +185,11 @@ impl<'ctx> DataFlow<'ctx> {
         let thunk = self.inner.borrow_mut().thunks.pop_first();
         move |process| {
             if let Some((_, thunk)) = thunk {
+                let ctx = process.ctx.clone();
+                let thunk2 = thunk.clone();
+                let _d = defer(move || if thread::panicking() {
+                    println!("Panic while forcing {:#?}", thunk2.full_debug(&ctx));
+                });
                 thunk.step(ComputeCtx { process: process, threadid });
                 true
             } else {

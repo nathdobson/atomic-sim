@@ -49,7 +49,7 @@ impl<'ctx> Thread<'ctx> {
                 let mut deps = vec![];
                 for value in params {
                     let value = value.clone();
-                    deps.push(data.constant(value).await);
+                    deps.push(data.constant(Backtrace::Nil, value).await);
                 }
                 main.call_imp(&FlowCtx::new(&ctx, &data, Backtrace::empty()), &deps).await;
             }

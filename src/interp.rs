@@ -368,21 +368,20 @@ impl<'ctx> InterpFrame<'ctx> {
             _ => todo!(),
         }.call(ctx, ty1, x, ty2, y)
     }
-    fn icmp(predicate: &IntPredicate, x: &Value, y: &Value) -> bool {
-        println!("{:?} {:?} {:?}", x, predicate, y);
-        match predicate {
-            IntPredicate::EQ => x.as_u128() == y.as_u128(),
-            IntPredicate::NE => x.as_u128() != y.as_u128(),
-            IntPredicate::ULE => x.as_u128() <= y.as_u128(),
-            IntPredicate::ULT => x.as_u128() < y.as_u128(),
-            IntPredicate::UGE => x.as_u128() >= y.as_u128(),
-            IntPredicate::UGT => x.as_u128() > y.as_u128(),
-            IntPredicate::SGT => x.as_i128() > y.as_i128(),
-            IntPredicate::SGE => x.as_i128() >= y.as_i128(),
-            IntPredicate::SLT => x.as_i128() < y.as_i128(),
-            IntPredicate::SLE => x.as_i128() <= y.as_i128(),
-        }
-    }
+    // fn icmp(predicate: &IntPredicate, x: &Value, y: &Value) -> bool {
+    //     match predicate {
+    //         IntPredicate::EQ => x.as_u128() == y.as_u128(),
+    //         IntPredicate::NE => x.as_u128() != y.as_u128(),
+    //         IntPredicate::ULE => x.as_u128() <= y.as_u128(),
+    //         IntPredicate::ULT => x.as_u128() < y.as_u128(),
+    //         IntPredicate::UGE => x.as_u128() >= y.as_u128(),
+    //         IntPredicate::UGT => x.as_u128() > y.as_u128(),
+    //         IntPredicate::SGT => x.as_i128() > y.as_i128(),
+    //         IntPredicate::SGE => x.as_i128() >= y.as_i128(),
+    //         IntPredicate::SLT => x.as_i128() < y.as_i128(),
+    //         IntPredicate::SLE => x.as_i128() <= y.as_i128(),
+    //     }
+    // }
     async fn decode_term<'a>(&'a mut self, flow: &'a FlowCtx<'ctx, 'a>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
         let name = format!("{} {:?}", term, term.get_debug_loc());
         match term {
@@ -391,7 +390,7 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Terminator::Ret(ret) => {
                 for x in self.allocs.iter() {
-                    flow.data().thunk(name.clone(), vec![x.clone()], |comp, args| {
+                    flow.data().thunk(name.clone(), flow.backtrace().clone(), vec![x.clone()], |comp, args| {
                         comp.process.free(comp.threadid, &args[0]);
                         Value::from(())
                     }).await;
@@ -399,7 +398,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 let result = if let Some(oper) = ret.return_operand.as_ref() {
                     self.get_temp(flow, oper).await
                 } else {
-                    flow.data().constant(Value::from(())).await
+                    flow.data().constant(flow.backtrace().clone(), Value::from(())).await
                 };
                 DecodeResult::Return(result)
             }
@@ -458,7 +457,7 @@ impl<'ctx> InterpFrame<'ctx> {
         };
         let fun_thunk = self.get_temp(flow, fun).await;
         let fun = fun_thunk.clone().await;
-        let fun = flow.ctx().try_reverse_lookup(&fun).unwrap_or_else(|| panic!("Unknown function {:?} {:#?} {}", fun, flow, fun_thunk.full_debug()));
+        let fun = flow.ctx().try_reverse_lookup(&fun).unwrap_or_else(|| panic!("Unknown function {:?} {:#?} {:#?}", fun, flow, fun_thunk.full_debug(&flow.ctx())));
         let fun = flow.ctx().functions.get(&fun).cloned().unwrap_or_else(|| panic!("Unknown function {:?}", fun));
         let mut deps = vec![];
         for (oper, _) in arguments.iter() {
@@ -475,7 +474,7 @@ impl<'ctx> InterpFrame<'ctx> {
                            dest: Option<&'ctx Name>,
                            deps: Vec<Thunk<'ctx>>,
                            compute: impl 'ctx + FnOnce(ComputeCtx<'ctx, '_>, &[&Value]) -> Value) -> Thunk<'ctx> {
-        let thunk = flow.data().thunk(name, deps, compute).await;
+        let thunk = flow.data().thunk(name, flow.backtrace().clone(), deps, compute).await;
         if let Some(dest) = dest {
             self.temps.insert(dest, thunk.clone());
         }

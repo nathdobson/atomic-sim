@@ -3,6 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::fmt;
 use crate::value::Value;
 use std::marker::PhantomData;
+use crate::ctx::Ctx;
 
 #[derive(Clone)]
 pub enum Backtrace<'ctx> {
@@ -36,6 +37,9 @@ impl<'ctx> Backtrace<'ctx> {
     }
     pub fn iter(&self) -> Iter<'ctx, '_> {
         Iter { backtrace: self }
+    }
+    pub fn full_debug(&self, ctx: &Ctx<'ctx>) -> impl Debug + 'ctx {
+        self.iter().map(|f| ctx.reverse_lookup(&ctx.value_from_address(f.ip))).collect::<Vec<_>>()
     }
 }
 
