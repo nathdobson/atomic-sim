@@ -16,7 +16,7 @@ use crate::backtrace::{Backtrace, BacktraceFrame};
 use crate::flow::FlowCtx;
 use crate::compute::ComputeCtx;
 use crate::symbols::Symbol;
-use crate::layout::{AggrLayout, Layout};
+use crate::layout::{AggrLayout, Layout, Packing};
 use crate::arith::{BinOp, UnOp};
 
 #[derive(Debug)]
@@ -137,7 +137,7 @@ impl<'ctx> InterpFrame<'ctx> {
                     Some(&alloca.dest),
                     vec![num],
                     move |comp, args| {
-                        let layout = layout.repeat(args[0].as_u64());
+                        let layout = layout.repeat(Packing::None, args[0].as_u64());
                         comp.process.alloc(comp.threadid, layout)
                     },
                 ).await;
@@ -203,9 +203,10 @@ impl<'ctx> InterpFrame<'ctx> {
                 let ty = flow.ctx().type_of(self.ectx, &gep.address);
                 let ctx = flow.ctx().clone();
                 self.add_thunk(flow, name, Some(&gep.dest), deps, move |comp, args| {
-                    let (_, offset) = ctx.offset_of(&ty,
+                    let (_, offset) = ctx.offset_bit(&ty,
                                                     args[1..].iter().map(|v| v.as_i64()));
-                    ctx.value_from_address(add_u64_i64(args[0].as_u64(), offset))
+                    assert_eq!(offset%8,0);
+                    ctx.value_from_address(add_u64_i64(args[0].as_u64(), offset/8))
                 }).await;
             }
             Instruction::InsertElement(InsertElement { vector, element, index, dest, .. }) => {
@@ -215,21 +216,18 @@ impl<'ctx> InterpFrame<'ctx> {
                     self.get_temp(flow, index).await];
                 let ty = flow.ctx().type_of(self.ectx, vector);
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
-                    let (_, offset) = comp.ctx().field(&*ty, args[2].as_i64());
-                    let mut vector = args[0].clone();
-                    let element = args[1];
-                    vector.insert(offset, element);
-                    vector
+                    let mut result = args[0].clone();
+                    comp.ctx().insert_value(&ty, &mut result, args[1], iter::once(args[2].as_i64()));
+                    result
                 }).await;
             }
             Instruction::InsertValue(InsertValue { aggregate, element, dest, indices, .. }) => {
                 let deps = vec![self.get_temp(flow, aggregate).await, self.get_temp(flow, element).await];
                 let ty = flow.ctx().type_of(self.ectx, aggregate);
-                let (_, offset) = flow.ctx().offset_of(&ty, indices.iter().map(|i| *i as i64));
+                //let (_, offset) = flow.ctx().offset_of(&ty, indices.iter().map(|i| *i as i64));
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
                     let mut aggregate = args[0].clone();
-                    let element = args[1];
-                    aggregate.insert(offset, element);
+                    comp.ctx().insert_value(&ty, &mut aggregate, args[1], indices.iter().map(|x| *x as i64));
                     aggregate
                 }).await;
             }
@@ -288,7 +286,7 @@ impl<'ctx> InterpFrame<'ctx> {
                     if success {
                         comp.process.store(comp.threadid, address, replacement, Some(atomicity));
                     }
-                    Value::aggregate(vec![old.clone(), Value::from(success)].into_iter(), false)
+                    Value::aggregate(vec![old.clone(), Value::from(success)].into_iter(), Packing::None)
                 }).await;
             }
             Instruction::Fence(Fence { atomicity, .. }) => {
@@ -301,11 +299,7 @@ impl<'ctx> InterpFrame<'ctx> {
                 let ectx = self.ectx;
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
                     let ty = comp.ctx().type_of(ectx, vector);
-                    let (ty2, offset) = comp.ctx().offset_of(&ty, iter::once(args[1].as_i64()));
-                    let layout = comp.ctx().layout(&ty2);
-                    let offset = offset as usize;
-                    let bytes = &args[0].bytes()[offset..offset + layout.bytes() as usize];
-                    Value::from_bytes(bytes, layout)
+                    comp.ctx().extract_value(&ty, args[0], iter::once(args[1].as_i64()))
                 }).await;
             }
             Instruction::ShuffleVector(ShuffleVector { operand0, operand1, dest, mask, .. }) => {
@@ -318,16 +312,18 @@ impl<'ctx> InterpFrame<'ctx> {
                 let width0 = flow.ctx().count(&*ty0);
                 let ty1 = flow.ctx().type_of(self.ectx, operand0);
                 let width1 = flow.ctx().count(&*ty1);
-                let (ty, off) = flow.ctx().field(&*ty0, 1);
-                let layout = flow.ctx().layout(&ty);
-                let out_layout = AggrLayout::new(false, iter::repeat(layout).take(mask_width as usize)).layout();
+                let (ty, _) = flow.ctx().field_bit(&*ty0, 1);
+                let out_ty = flow.ctx().vector_of(ty, mask_width);
                 self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
-                    let input = Value::aggregate([args[0], args[1]].iter().cloned().cloned(), false);
-                    let mut result = Value::from_bytes(&vec![0; out_layout.bytes() as usize], out_layout);
+                    let mut result = comp.ctx().aggregate_zero(&out_ty);
                     for i in 0..mask_width {
-                        let index = mask.extract((i * 4) as i64, Layout::of_int(32)).unwrap_u32() as i64;
-                        let value = input.extract((index * off) as i64, layout);
-                        result.insert(i as i64 * off, &value);
+                        let index = comp.ctx().extract_value(&mask_type, &mask, iter::once(i as i64)).unwrap_u32() as i64;
+                        let value = if index < width0 as i64 {
+                            comp.ctx().extract_value(&ty0, args[0], iter::once(index))
+                        } else {
+                            comp.ctx().extract_value(&ty1, args[1], iter::once(index - width0 as i64))
+                        };
+                        comp.ctx().insert_value(&out_ty, &mut result, &value, iter::once(index));
                     }
                     result
                 }).await;

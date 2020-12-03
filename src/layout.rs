@@ -15,6 +15,13 @@ pub struct AggrLayout {
     layout: Layout,
 }
 
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
+pub enum Packing {
+    None,
+    Bit,
+    Byte,
+}
+
 impl Layout {
     pub fn from_bytes(bytes: u64, byte_align: u64) -> Self {
         Self { bits: bytes * 8, bit_align: byte_align * 8 }
@@ -24,16 +31,23 @@ impl Layout {
         assert!(bit_align.is_power_of_two());
         Self { bits, bit_align }
     }
-    fn extend(&self, packed: bool, other: Self) -> (Self, u64) {
-        if packed {
-            let offset = align_to(self.bits, 8);
-            (Self { bits: offset + other.bits, bit_align: 8 }, offset)
-        } else {
-            let offset = align_to(self.bits, other.bit_align);
-            (Self {
-                bits: offset + other.bits,
-                bit_align: self.bit_align.max(other.bit_align),
-            }, offset)
+    fn extend(&self, packing: Packing, other: Self) -> (Self, u64) {
+        match packing {
+            Packing::None => {
+                let offset = align_to(self.bits, other.bit_align);
+                (Self {
+                    bits: offset + other.bits,
+                    bit_align: self.bit_align.max(other.bit_align),
+                }, offset)
+            }
+            Packing::Bit => {
+                let offset = self.bits;
+                (Self { bits: offset + other.bits, bit_align: 8 }, offset)
+            }
+            Packing::Byte => {
+                let offset = align_to(self.bits, 8);
+                (Self { bits: offset + other.bits, bit_align: 8 }, offset)
+            }
         }
     }
     pub fn bytes(&self) -> u64 {
@@ -50,18 +64,29 @@ impl Layout {
     pub fn pad_to_align(&self) -> Self {
         Layout::from_bits(align_to(self.bits, self.bit_align), self.bit_align)
     }
-    pub fn repeat(&self, n: u64) -> Self {
-        assert!(self.bits % 8 == 0);
-        Layout::from_bits(self.bits * n, self.bit_align)
+    pub fn repeat(&self, packing: Packing, n: u64) -> Self {
+        match packing {
+            Packing::None => {
+                assert_eq!(self.bit_align % 8, 0);
+                Layout::from_bits(align_to(self.bits, self.bit_align) * n, self.bit_align)
+            }
+            Packing::Bit => {
+                Layout::from_bits(self.bits * n, 8)
+            }
+            Packing::Byte => {
+                assert_eq!(self.bit_align % 8, 0);
+                Layout::from_bits(align_to(self.bits, 8) * n, 8)
+            }
+        }
     }
 }
 
 impl AggrLayout {
-    pub fn new(packed: bool, iter: impl Iterator<Item=Layout>) -> Self {
+    pub fn new(packing: Packing, iter: impl Iterator<Item=Layout>) -> Self {
         let mut result = Layout::from_bits(0, 8);
         let mut bit_offsets = vec![];
         for layout in iter {
-            let (new, off) = result.extend(packed, layout);
+            let (new, off) = result.extend(packing, layout);
             result = new;
             bit_offsets.push(off);
         }
@@ -73,13 +98,23 @@ impl AggrLayout {
     pub fn layout(&self) -> Layout {
         self.layout
     }
-    pub fn bit_offset(&self, offset: usize) -> u64 {
-        self.bit_offsets[offset]
+    pub fn bit_offset(&self, index: usize) -> u64 {
+        self.bit_offsets[index]
     }
 }
 
 impl Debug for Layout {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "b{}%{}", self.bits, self.bit_align)
+    }
+}
+
+impl From<bool> for Packing {
+    fn from(is_packed: bool) -> Self {
+        if is_packed {
+            Packing::Byte
+        } else {
+            Packing::None
+        }
     }
 }

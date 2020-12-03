@@ -79,7 +79,7 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
         let len = self.strlen(string).await;
         String::from_utf8(
             self.load(string,
-                      Layout::from_bytes(len.as_u64(), 1)).await.bytes().to_vec()).unwrap()
+                      Layout::from_bytes(len.as_u64(), 1)).await.as_bytes().to_vec()).unwrap()
     }
 
 

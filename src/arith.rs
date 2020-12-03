@@ -3,7 +3,7 @@ use crate::value::Value;
 use crate::ctx::Ctx;
 use std::ops::Add;
 use std::iter;
-use crate::layout::Layout;
+use crate::layout::{Layout, Packing};
 
 #[derive(Debug)]
 pub enum BinOp {
@@ -49,7 +49,7 @@ impl BinOp {
                     self.call(ctx,
                               e1, &ctx.extract_value(ty1, v1, iter::once(i as i64)),
                               e2, &ctx.extract_value(ty2, v2, iter::once(i as i64)))
-                }), false)
+                }), Packing::Bit)
             }
             _ => todo!("{:?} {:?} {:?}", ty1, self, ty2)
         }
@@ -135,12 +135,7 @@ impl UnOp {
         }
     }
     pub fn ucast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
-        let lto = ctx.layout(ty2);
-        assert!(v1.bits() % 8 == 0 || v1.bits() < lto.bits());
-        assert_eq!(lto.bits() % 8, 0);
-        let mut vec = v1.bytes().to_vec();
-        vec.resize(lto.bytes() as usize, 0);
-        Value::from_bytes(&vec, lto)
+        v1.ucast(ctx.layout(ty2))
     }
     pub fn scast<'ctx>(ctx: &Ctx<'ctx>, ty1: &TypeRef, v1: &Value, ty2: &TypeRef) -> Value {
         match (&**ty1, &**ty2) {
@@ -157,7 +152,7 @@ impl UnOp {
                     Self::scast(ctx,
                                 e1, &ctx.extract_value(ty1, v1, iter::once(i as i64)),
                                 e2)
-                }), false)
+                }), Packing::Bit)
             }
             _ => todo!("{:?} {:?}", ty1, ty2),
         }

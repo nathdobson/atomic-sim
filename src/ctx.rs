@@ -4,7 +4,7 @@ use llvm_ir::{Module, Function, Name, BasicBlock, TypeRef, Type, Constant, const
 use std::collections::HashMap;
 use llvm_ir::types::NamedStructDef;
 use crate::value::{Value, add_u64_i64};
-use crate::layout::{Layout, AggrLayout};
+use crate::layout::{Layout, AggrLayout, Packing, align_to};
 use crate::memory::{Memory};
 use crate::function::Func;
 use crate::symbols::{SymbolTable, Symbol};
@@ -59,11 +59,11 @@ impl<'ctx> Ctx<'ctx> {
     pub fn struct_of(&self, fields: Vec<TypeRef>, is_packed: bool) -> TypeRef {
         self.modules[0].types.struct_of(fields, is_packed)
     }
-    pub fn array_of(&self, elem: TypeRef, num_elements: usize) -> TypeRef {
-        self.modules[0].types.array_of(elem, num_elements)
+    pub fn array_of(&self, elem: TypeRef, num_elements: u64) -> TypeRef {
+        self.modules[0].types.array_of(elem, num_elements as usize)
     }
-    pub fn vector_of(&self, elem: TypeRef, num_elements: usize) -> TypeRef {
-        self.modules[0].types.vector_of(elem, num_elements)
+    pub fn vector_of(&self, elem: TypeRef, num_elements: u64) -> TypeRef {
+        self.modules[0].types.vector_of(elem, num_elements as usize)
     }
     pub fn int(&self, bits: u64) -> TypeRef {
         self.modules[0].types.int(bits as u32)
@@ -83,8 +83,7 @@ impl<'ctx> Ctx<'ctx> {
         self.value_from_address(0)
     }
     pub fn aggregate_zero(&self, ty: &TypeRef) -> Value {
-        let layout = self.layout(ty);
-        Value::from_bytes(&vec![0; layout.bytes() as usize], layout)
+        Value::zero(self.layout(ty))
     }
     pub fn layout_of_ptr(&self) -> Layout {
         Layout::from_bits(self.ptr_bits, self.ptr_bits)
@@ -94,12 +93,15 @@ impl<'ctx> Ctx<'ctx> {
             Type::IntegerType { bits } => Layout::of_int(*bits as u64),
             Type::PointerType { .. } => self.layout_of_ptr(),
             Type::StructType { element_types, is_packed } => {
-                AggrLayout::new(*is_packed, element_types.iter().map(|t| self.layout(t))).layout()
+                AggrLayout::new(Packing::from(*is_packed), element_types.iter().map(|t| self.layout(t))).layout()
             }
-            Type::VectorType { element_type, num_elements }
-            | Type::ArrayType { element_type, num_elements } => {
+            Type::VectorType { element_type, num_elements } => {
                 let layout = self.layout(&*element_type).pad_to_align();
-                Layout::from_bits(layout.bits() * (*num_elements as u64), layout.bit_align())
+                layout.repeat(Packing::None, *num_elements as u64)
+            }
+            Type::ArrayType { element_type, num_elements } => {
+                let layout = self.layout(&*element_type).pad_to_align();
+                layout.repeat(Packing::None, *num_elements as u64)
             }
             Type::NamedStructType { name } => {
                 self.layout(self.type_of_struct(name))
@@ -192,21 +194,22 @@ impl<'ctx> Ctx<'ctx> {
                 } else {
                     self.struct_of(children.iter().map(|(ty, v)| ty.clone()).collect(), *is_packed)
                 };
-                (ty, Value::aggregate(children.iter().map(|(ty, v)| v.clone()), *is_packed))
+                (ty, Value::aggregate(children.iter().map(|(ty, v)| v.clone()), (*is_packed).into()))
             }
             Constant::Array { element_type, elements } => {
-                (self.array_of(element_type.clone(), elements.len()),
+                (self.array_of(element_type.clone(), elements.len() as u64),
                  Value::aggregate(elements.iter().map(|c| {
                      let (ty, v) = self.get_constant(ectx, c);
                      assert_eq!(ty, *element_type);
                      v
-                 }), false))
+                 }), Packing::None))
             }
             Constant::GetElementPtr(constant::GetElementPtr { address, indices, in_bounds }) => {
                 let (ty, address) = self.get_constant(ectx, address);
                 let indices = indices.iter().map(|c| self.get_constant(ectx, c).1.as_i64()).collect::<Vec<_>>();
-                let (ty, val) = self.offset_of(&ty, indices.iter().cloned());
-                (self.pointer_to(ty.clone()), self.value_from_address(add_u64_i64(address.as_u64(), val)))
+                let (ty, val) = self.offset_bit(&ty, indices.iter().cloned());
+                assert_eq!(val % 8, 0);
+                (self.pointer_to(ty.clone()), self.value_from_address(add_u64_i64(address.as_u64(), val / 8)))
             }
             Constant::AggregateZero(typ) => {
                 (typ.clone(), self.aggregate_zero(typ))
@@ -214,7 +217,7 @@ impl<'ctx> Ctx<'ctx> {
             Constant::Vector(vec) => {
                 let elems = vec.iter().map(|c| self.get_constant(ectx, c)).collect::<Vec<_>>();
                 let ty = elems[0].0.clone();
-                (self.vector_of(ty, vec.len()), Value::aggregate(elems.into_iter().map(|(t, v)| v), false))
+                (self.vector_of(ty, vec.len() as u64), Value::aggregate(elems.into_iter().map(|(t, v)| v), Packing::Bit))
             }
             x => todo!("{:?}", x),
         }
@@ -236,39 +239,41 @@ impl<'ctx> Ctx<'ctx> {
             x => todo!("{:?}", x),
         }
     }
-    pub fn offset_of(&self, ty: &TypeRef, vs: impl Iterator<Item=i64>) -> (TypeRef, i64) {
+    pub fn offset_bit(&self, ty: &TypeRef, vs: impl Iterator<Item=i64>) -> (TypeRef, i64) {
         let mut offset = 0i64;
         let mut ty = ty.clone();
         for i in vs {
-            let (ty2, offset2) = self.field(&ty, i);
+            let (ty2, offset2) = self.field_bit(&ty, i);
             offset += offset2;
             ty = ty2;
         }
         (ty, offset)
     }
-    pub fn field<'a>(&'a self, ty: &'a Type, index: i64) -> (TypeRef, i64) {
+    pub fn field_bit<'a>(&'a self, ty: &'a Type, index: i64) -> (TypeRef, i64) {
         match ty {
             Type::PointerType { pointee_type, .. } => {
-                (pointee_type.clone(), index * (self.layout(&*pointee_type).bytes() as i64))
+                (pointee_type.clone(), index * (self.layout(&*pointee_type).bits() as i64))
             }
             Type::StructType { element_types, is_packed } => {
-                let layout = AggrLayout::new(*is_packed,
-                                             element_types
-                                                 .iter()
-                                                 .map(|t| self.layout(t)));
+                let layout = AggrLayout::new(
+                    (*is_packed).into(),
+                    element_types
+                        .iter()
+                        .map(|t| self.layout(t)));
                 let offset_bits = layout.bit_offset(index as usize);
-                assert!(offset_bits % 8 == 0);
-                (element_types[index as usize].clone(), (offset_bits / 8) as i64)
+                (element_types[index as usize].clone(), offset_bits as i64)
             }
             Type::ArrayType { element_type, num_elements } => {
-                (element_type.clone(), index * (self.layout(&element_type).bytes() as i64))
+                let layout = self.layout(&element_type);
+                let stride = align_to(layout.bits(), layout.bit_align());
+                (element_type.clone(), index * stride as i64)
             }
             Type::NamedStructType { name } => {
                 let ty: &'a TypeRef = self.type_of_struct(name);
-                self.field(ty, index)
+                self.field_bit(ty, index)
             }
             Type::VectorType { element_type, num_elements } => {
-                (element_type.clone(), index * (self.layout(&element_type).bytes() as i64))
+                (element_type.clone(), index * (self.layout(&element_type).bits() as i64))
             }
             ty => todo!("{:?}", ty),
         }
@@ -311,9 +316,14 @@ impl<'ctx> Ctx<'ctx> {
         self.image.clone()
     }
     pub fn extract_value(&self, ty: &TypeRef, v: &Value, indices: impl Iterator<Item=i64>) -> Value {
-        let (ty2, offset) = self.offset_of(&ty, indices);
+        let (ty2, offset) = self.offset_bit(&ty, indices);
         let layout = self.layout(&ty2);
-        v.extract(offset, layout)
+        v.extract_bits(offset, layout)
+    }
+    pub fn insert_value(&self, ty: &TypeRef, aggregate: &mut Value, element: &Value, indices: impl Iterator<Item=i64>) {
+        let (ty2, offset) = self.offset_bit(&ty, indices);
+        let layout = self.layout(&ty2);
+        aggregate.insert_bits(offset, element)
     }
 }
 

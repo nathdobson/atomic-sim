@@ -75,7 +75,7 @@ impl<'ctx> Memory<'ctx> {
     }
     pub fn store(&mut self, ptr: &Value, value: &Value, _atomicity: Option<&'ctx Atomicity>) {
         println!("Storing *{:?} = {:?}", ptr, value);
-        let value = value.bytes().to_vec();
+        let value = value.as_bytes().to_vec();
         let len = value.len() as u64;
         let alloc = self.find_alloc_mut(ptr);
         let ptr = ptr.as_u64();

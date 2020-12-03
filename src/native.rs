@@ -12,6 +12,7 @@ use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
 use crate::compute::ComputeCtx;
 use crate::ctx::EvalCtx;
+use crate::layout::Packing;
 
 struct NativeComp<'ctx> {
     name: &'ctx str,
@@ -78,7 +79,7 @@ macro_rules! overflow_binop {
                 Value::aggregate([
                                      Value::from(x.$wrapping(y)),
                                      Value::from(x.$checked(y).is_none())
-                                 ].iter().cloned(), false)
+                                 ].iter().cloned(), Packing::None)
             }
         )
     }
@@ -262,7 +263,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             } else {
                 Value::from(())
             };
-            let value = value.bytes();
+            let value = value.as_bytes();
             let string = String::from_utf8(value.to_vec()).unwrap();
             print!("{}", string);
             len
