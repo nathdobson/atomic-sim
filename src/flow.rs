@@ -7,6 +7,7 @@ use crate::layout::Layout;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 
+#[derive(Clone)]
 pub struct FlowCtx<'ctx, 'flow> {
     ctx: &'flow Rc<Ctx<'ctx>>,
     data: &'flow DataFlow<'ctx>,

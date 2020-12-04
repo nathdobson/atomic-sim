@@ -15,13 +15,6 @@ use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use llvm_ir::DebugLoc;
 
-// pub struct ExecArgs<'ctx, 'exec> {
-//     pub ctx: &'exec Rc<Ctx<'ctx>>,
-//     pub data: &'exec DataFlow<'ctx>,
-//     pub backtrace: &'exec Backtrace<'ctx>,
-//     pub args: Vec<Thunk<'ctx>>,
-// }
-
 pub trait Func<'ctx>: 'ctx {
     fn name(&self) -> &'ctx str;
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>>;

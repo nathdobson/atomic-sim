@@ -36,17 +36,22 @@ impl<'ctx> InterpFunc<'ctx> {
     }
 }
 
-
 struct InterpFrame<'ctx> {
-    //pub ctx: Rc<Ctx<'ctx>>,
-    pub fp: u64,
-    pub fun: &'ctx Function,
-    pub origin: Option<&'ctx Name>,
-    pub temps: HashMap<&'ctx Name, Thunk<'ctx>>,
-    pub allocs: Vec<Thunk<'ctx>>,
-    pub result: Option<&'ctx Name>,
-    pub blocks: HashMap<&'ctx Name, &'ctx BasicBlock>,
-    pub ectx: EvalCtx,
+    fp: u64,
+    fun: &'ctx Function,
+    origin: Option<&'ctx Name>,
+    temps: HashMap<&'ctx Name, Thunk<'ctx>>,
+    allocs: Vec<Thunk<'ctx>>,
+    result: Option<&'ctx Name>,
+    blocks: HashMap<&'ctx Name, &'ctx BasicBlock>,
+    ectx: EvalCtx,
+}
+
+struct InterpCtx<'ctx, 'int> {
+    ctx: &'int Rc<Ctx<'ctx>>,
+    flow: FlowCtx<'ctx, 'int>,
+    frame: &'int mut InterpFrame<'ctx>,
+    name: String,
 }
 
 enum DecodeResult<'ctx> {
@@ -84,7 +89,6 @@ impl<'ctx> InterpFrame<'ctx> {
                 .map(|block| (&block.name, block))
                 .collect();
         let mut frame = InterpFrame {
-            //ctx: flow.ctx(),
             fp,
             fun,
             origin: None,
@@ -99,7 +103,7 @@ impl<'ctx> InterpFrame<'ctx> {
     pub fn decode<'flow>(&'flow mut self, flow: &'flow FlowCtx<'ctx, 'flow>) -> impl Future<Output=Thunk<'ctx>> + 'flow {
         Box::pin(async move { self.decode_impl(flow).await })
     }
-    pub async fn decode_impl(&mut self, flow: &FlowCtx<'ctx, '_>) -> Thunk<'ctx> {
+    pub async fn decode_impl<'flow>(&mut self, flow: &'flow FlowCtx<'ctx, 'flow>) -> Thunk<'ctx> {
         let mut block = self.fun.basic_blocks.get(0).unwrap();
         loop {
             let mut iter = block.instrs.iter().peekable();
@@ -110,16 +114,26 @@ impl<'ctx> InterpFrame<'ctx> {
                     phi.incoming_values.iter()
                         .find(|(_, name)| Some(name) == self.origin)
                         .unwrap_or_else(|| panic!("No target {:?} in {:?}", self.origin, self.fun.name));
-                let deps = vec![self.get_temp(&flow, oper).await];
+                let deps = vec![self.get_temp(flow, oper).await];
                 phis.push((phi, deps));
             }
             for (phi, deps) in phis {
                 self.add_thunk(flow, format!("{}", phi), Some(&phi.dest), deps, |comp, args| args[0].clone()).await;
             }
             for instr in iter {
-                self.decode_instr(&flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }), instr).await;
+                InterpCtx {
+                    ctx: flow.ctx(),
+                    flow: flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }),
+                    frame: self,
+                    name: format!("{} {:?}", instr, instr.get_debug_loc()),
+                }.decode_instr(instr).await;
             }
-            match self.decode_term(&flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }), &block.term).await {
+            match (InterpCtx {
+                ctx: flow.ctx(),
+                flow: flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }),
+                frame: self,
+                name: format!("{} {:?}", block.term, block.term.get_debug_loc()),
+            }.decode_term(&block.term).await) {
                 DecodeResult::Jump(name) => {
                     self.origin = Some(&block.name);
                     block = *self.blocks.get(name).unwrap();
@@ -128,18 +142,45 @@ impl<'ctx> InterpFrame<'ctx> {
             };
         }
     }
-    async fn decode_instr<'a>(&'a mut self, flow: &'a FlowCtx<'ctx, '_>, instr: &'ctx Instruction) {
+    async fn add_thunk<'a>(&'a mut self,
+                           flow: &'a FlowCtx<'ctx, 'a>,
+                           name: String,
+                           dest: Option<&'ctx Name>,
+                           deps: Vec<Thunk<'ctx>>,
+                           compute: impl 'ctx + FnOnce(ComputeCtx<'ctx, '_>, &[&Value]) -> Value) -> Thunk<'ctx> {
+        let thunk = flow.data().thunk(name, flow.backtrace().clone(), deps, compute).await;
+        if let Some(dest) = dest {
+            self.temps.insert(dest, thunk.clone());
+        }
+        thunk
+    }
+    async fn get_temp<'flow>(&'flow mut self, flow: &FlowCtx<'ctx, 'flow>, oper: &'ctx Operand) -> Thunk<'ctx> {
+        match oper {
+            Operand::LocalOperand { name, .. } => {
+                self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
+            }
+            Operand::ConstantOperand(constant) => {
+                let value = flow.ctx().get_constant(self.ectx, constant).1;
+                self.add_thunk(flow, constant.to_string(), None, vec![], move |_, _| value).await
+            }
+            Operand::MetadataOperand => {
+                self.add_thunk(flow, "metadata".to_string(), None, vec![], |_, _| Value::from(())).await
+            }
+        }
+    }
+}
+
+impl<'ctx, 'int> InterpCtx<'ctx, 'int> {
+    async fn decode_instr<'a>(&'a mut self, instr: &'ctx Instruction) {
         let name = format!("{} {:?}", instr, instr.get_debug_loc());
         match instr {
             Instruction::Call(call) => {
-                self.decode_call(flow, &call.function, &call.arguments, call.dest.as_ref()).await;
+                self.decode_call(&call.function, &call.arguments, call.dest.as_ref()).await;
             }
             Instruction::Alloca(alloca) => {
-                let num = self.get_temp(flow, &alloca.num_elements).await;
-                let layout = flow.ctx().layout(&alloca.allocated_type);
+                let num = self.get_temp(&alloca.num_elements).await;
+                let layout = self.ctx.layout(&alloca.allocated_type);
                 let thunk = self.add_thunk(
-                    flow,
-                    name,
                     Some(&alloca.dest),
                     vec![num],
                     move |comp, args| {
@@ -147,21 +188,21 @@ impl<'ctx> InterpFrame<'ctx> {
                         comp.process.alloc(comp.threadid, layout)
                     },
                 ).await;
-                self.allocs.push(thunk);
+                self.frame.allocs.push(thunk);
             }
             Instruction::Store(store) => {
-                let address = self.get_temp(flow, &store.address).await;
-                let value = self.get_temp(flow, &store.value).await;
+                let address = self.get_temp(&store.address).await;
+                let value = self.get_temp(&store.value).await;
                 let deps = vec![address, value];
-                self.add_thunk(flow, name, None, deps, move |comp, args| {
+                self.add_thunk(None, deps, move |comp, args| {
                     comp.process.store(comp.threadid, args[0], args[1], store.atomicity.as_ref());
                     Value::from(())
                 }).await;
             }
             Instruction::Load(load) => {
-                let deps = vec![self.get_temp(flow, &load.address).await];
-                let layout = flow.ctx().layout(&flow.ctx().target_of(&flow.ctx().type_of(self.ectx, &load.address)));
-                self.add_thunk(flow, name, Some(&load.dest), deps, move |comp, args| {
+                let deps = vec![self.get_temp(&load.address).await];
+                let layout = self.ctx.layout(&self.ctx.target_of(&self.ctx.type_of(self.frame.ectx, &load.address)));
+                self.add_thunk(Some(&load.dest), deps, move |comp, args| {
                     comp.process.load(comp.threadid, args[0], layout, load.atomicity.as_ref())
                 }).await;
             }
@@ -180,11 +221,12 @@ impl<'ctx> InterpFrame<'ctx> {
             Instruction::AShr(AShr { dest, operand0, operand1, .. }) |
             Instruction::ICmp(ICmp { dest, operand0, operand1, .. })
             => {
-                let deps = vec![self.get_temp(flow, operand0).await, self.get_temp(flow, operand1).await];
-                let ctx = flow.ctx().clone();
-                let ty1 = flow.ctx().type_of(self.ectx, operand0);
-                let ty2 = flow.ctx().type_of(self.ectx, operand1);
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args|
+                let deps = vec![self.get_temp(operand0).await, self.get_temp(operand1).await];
+                let ctx = self.ctx.clone();
+                let ty1 = self.ctx.type_of(self.frame.ectx, operand0);
+                let ty2 = self.ctx.type_of(self.frame.ectx, operand1);
+                let ctx = self.ctx.clone();
+                self.add_thunk(Some(dest), deps, move |comp, args|
                     Self::binary(&*ctx, instr, &ty1, args[0], &ty2, args[1])).await;
             }
             Instruction::SExt(SExt { dest, operand, .. }) |
@@ -193,22 +235,22 @@ impl<'ctx> InterpFrame<'ctx> {
             Instruction::PtrToInt(PtrToInt { dest, operand, .. }) |
             Instruction::IntToPtr(IntToPtr { dest, operand, .. }) |
             Instruction::BitCast(BitCast { dest, operand, .. }) => {
-                let deps = vec![self.get_temp(flow, operand).await];
-                let ctx = flow.ctx().clone();
-                let ty = flow.ctx().type_of(self.ectx, operand);
-                self.add_thunk(flow, name, Some(dest), deps,
+                let deps = vec![self.get_temp(operand).await];
+                let ctx = self.ctx.clone();
+                let ty = self.ctx.type_of(self.frame.ectx, operand);
+                self.add_thunk(Some(dest), deps,
                                move |comp, args|
                                    Self::unary(&*ctx, instr, &ty, args[0])).await;
             }
             Instruction::GetElementPtr(gep) => {
-                let mut deps = vec![self.get_temp(flow, &gep.address).await];
+                let mut deps = vec![self.get_temp(&gep.address).await];
                 for ind in gep.indices.iter() {
-                    deps.push(self.get_temp(flow, ind).await);
+                    deps.push(self.get_temp(ind).await);
                 }
-                let ectx = self.ectx;
-                let ty = flow.ctx().type_of(self.ectx, &gep.address);
-                let ctx = flow.ctx().clone();
-                self.add_thunk(flow, name, Some(&gep.dest), deps, move |comp, args| {
+                let ectx = self.frame.ectx;
+                let ty = self.ctx.type_of(self.frame.ectx, &gep.address);
+                let ctx = self.ctx.clone();
+                self.add_thunk(Some(&gep.dest), deps, move |comp, args| {
                     let (_, offset) = ctx.offset_bit(&ty,
                                                      args[1..].iter().map(|v| v.as_i64()));
                     assert_eq!(offset % 8, 0);
@@ -217,32 +259,32 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Instruction::InsertElement(InsertElement { vector, element, index, dest, .. }) => {
                 let deps = vec![
-                    self.get_temp(flow, vector).await,
-                    self.get_temp(flow, element).await,
-                    self.get_temp(flow, index).await];
-                let ty = flow.ctx().type_of(self.ectx, vector);
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                    self.get_temp(vector).await,
+                    self.get_temp(element).await,
+                    self.get_temp(index).await];
+                let ty = self.ctx.type_of(self.frame.ectx, vector);
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let mut result = args[0].clone();
                     comp.ctx().insert_value(&ty, &mut result, args[1], iter::once(args[2].as_i64()));
                     result
                 }).await;
             }
             Instruction::InsertValue(InsertValue { aggregate, element, dest, indices, .. }) => {
-                let deps = vec![self.get_temp(flow, aggregate).await, self.get_temp(flow, element).await];
-                let ty = flow.ctx().type_of(self.ectx, aggregate);
-                //let (_, offset) = flow.ctx().offset_of(&ty, indices.iter().map(|i| *i as i64));
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                let deps = vec![self.get_temp(aggregate).await, self.get_temp(element).await];
+                let ty = self.ctx.type_of(self.frame.ectx, aggregate);
+                //let (_, offset) = self.ctx.offset_of(&ty, indices.iter().map(|i| *i as i64));
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let mut aggregate = args[0].clone();
                     comp.ctx().insert_value(&ty, &mut aggregate, args[1], indices.iter().map(|x| *x as i64));
                     aggregate
                 }).await;
             }
             Instruction::AtomicRMW(AtomicRMW { address, value, dest, operation, atomicity, .. }) => {
-                let deps = vec![self.get_temp(flow, address).await, self.get_temp(flow, value).await];
-                let ty = flow.ctx().target_of(&flow.ctx().type_of(self.ectx, address));
-                let layout = flow.ctx().layout(&ty);
+                let deps = vec![self.get_temp(address).await, self.get_temp(value).await];
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.frame.ectx, address));
+                let layout = self.ctx.layout(&ty);
 
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let current = comp.process.load(comp.threadid, args[0], layout, Some(atomicity)).clone();
 
                     let new = match operation {
@@ -260,10 +302,10 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Instruction::Select(Select { condition, true_value, false_value, dest, .. }) => {
                 let deps =
-                    vec![self.get_temp(flow, condition).await,
-                         self.get_temp(flow, true_value).await,
-                         self.get_temp(flow, false_value).await];
-                self.add_thunk(flow, name, Some(dest), deps, |comp, args|
+                    vec![self.get_temp(condition).await,
+                         self.get_temp(true_value).await,
+                         self.get_temp(false_value).await];
+                self.add_thunk(Some(dest), deps, |comp, args|
                     if args[0].unwrap_bool() {
                         args[1].clone()
                     } else {
@@ -272,20 +314,20 @@ impl<'ctx> InterpFrame<'ctx> {
                 ).await;
             }
             Instruction::ExtractValue(ExtractValue { aggregate, dest, indices, .. }) => {
-                let deps = vec![self.get_temp(flow, aggregate).await];
-                let ty = flow.ctx().type_of(self.ectx, aggregate);
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                let deps = vec![self.get_temp(aggregate).await];
+                let ty = self.ctx.type_of(self.frame.ectx, aggregate);
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     comp.ctx().extract_value(&ty, args[0], indices.iter().map(|x| *x as i64))
                 }).await;
             }
             Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, atomicity, .. }) => {
                 let deps =
-                    vec![self.get_temp(flow, address).await,
-                         self.get_temp(flow, expected).await,
-                         self.get_temp(flow, replacement).await];
-                let ty = flow.ctx().target_of(&flow.ctx().type_of(self.ectx, address));
-                let layout = flow.ctx().layout(&ty);
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                    vec![self.get_temp(address).await,
+                         self.get_temp(expected).await,
+                         self.get_temp(replacement).await];
+                let ty = self.ctx.target_of(&self.ctx.type_of(self.frame.ectx, address));
+                let layout = self.ctx.layout(&ty);
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let (address, expected, replacement) = (args[0], args[1], args[2]);
                     let old = comp.process.load(comp.threadid, address, layout, Some(atomicity));
                     let success = &old == expected;
@@ -300,27 +342,27 @@ impl<'ctx> InterpFrame<'ctx> {
             }
             Instruction::ExtractElement(ExtractElement { vector, index, dest, .. }) => {
                 let deps =
-                    vec![self.get_temp(flow, vector).await,
-                         self.get_temp(flow, index).await];
-                let ectx = self.ectx;
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                    vec![self.get_temp(vector).await,
+                         self.get_temp(index).await];
+                let ectx = self.frame.ectx;
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let ty = comp.ctx().type_of(ectx, vector);
                     comp.ctx().extract_value(&ty, args[0], iter::once(args[1].as_i64()))
                 }).await;
             }
             Instruction::ShuffleVector(ShuffleVector { operand0, operand1, dest, mask, .. }) => {
                 let deps = vec![
-                    self.get_temp(flow, operand0).await,
-                    self.get_temp(flow, operand1).await];
-                let (mask_type, mask) = flow.ctx().get_constant(self.ectx, mask);
-                let mask_width = flow.ctx().count(&mask_type);
-                let ty0 = flow.ctx().type_of(self.ectx, operand0);
-                let width0 = flow.ctx().count(&*ty0);
-                let ty1 = flow.ctx().type_of(self.ectx, operand0);
-                let width1 = flow.ctx().count(&*ty1);
-                let (ty, _) = flow.ctx().field_bit(&*ty0, 1);
-                let out_ty = flow.ctx().vector_of(ty, mask_width);
-                self.add_thunk(flow, name, Some(dest), deps, move |comp, args| {
+                    self.get_temp(operand0).await,
+                    self.get_temp(operand1).await];
+                let (mask_type, mask) = self.ctx.get_constant(self.frame.ectx, mask);
+                let mask_width = self.ctx.count(&mask_type);
+                let ty0 = self.ctx.type_of(self.frame.ectx, operand0);
+                let width0 = self.ctx.count(&*ty0);
+                let ty1 = self.ctx.type_of(self.frame.ectx, operand0);
+                let width1 = self.ctx.count(&*ty1);
+                let (ty, _) = self.ctx.field_bit(&*ty0, 1);
+                let out_ty = self.ctx.vector_of(ty, mask_width);
+                self.add_thunk(Some(dest), deps, move |comp, args| {
                     let mut result = comp.ctx().aggregate_zero(&out_ty);
                     for i in 0..mask_width {
                         let index = comp.ctx().extract_value(&mask_type, &mask, iter::once(i as i64)).unwrap_u32() as i64;
@@ -369,42 +411,27 @@ impl<'ctx> InterpFrame<'ctx> {
             _ => todo!(),
         }.call(ctx, ty1, x, ty2, y)
     }
-    // fn icmp(predicate: &IntPredicate, x: &Value, y: &Value) -> bool {
-    //     match predicate {
-    //         IntPredicate::EQ => x.as_u128() == y.as_u128(),
-    //         IntPredicate::NE => x.as_u128() != y.as_u128(),
-    //         IntPredicate::ULE => x.as_u128() <= y.as_u128(),
-    //         IntPredicate::ULT => x.as_u128() < y.as_u128(),
-    //         IntPredicate::UGE => x.as_u128() >= y.as_u128(),
-    //         IntPredicate::UGT => x.as_u128() > y.as_u128(),
-    //         IntPredicate::SGT => x.as_i128() > y.as_i128(),
-    //         IntPredicate::SGE => x.as_i128() >= y.as_i128(),
-    //         IntPredicate::SLT => x.as_i128() < y.as_i128(),
-    //         IntPredicate::SLE => x.as_i128() <= y.as_i128(),
-    //     }
-    // }
-    async fn decode_term<'a>(&'a mut self, flow: &'a FlowCtx<'ctx, 'a>, term: &'ctx Terminator) -> DecodeResult<'ctx> {
-        let name = format!("{} {:?}", term, term.get_debug_loc());
+    async fn decode_term<'a>(&'a mut self, term: &'ctx Terminator) -> DecodeResult<'ctx> {
         match term {
             Terminator::Br(br) => {
                 DecodeResult::Jump(&br.dest)
             }
             Terminator::Ret(ret) => {
-                for x in self.allocs.iter() {
-                    flow.data().thunk(name.clone(), flow.backtrace().clone(), vec![x.clone()], |comp, args| {
+                for x in self.frame.allocs.iter() {
+                    self.flow.data().thunk(self.name.clone(), self.flow.backtrace().clone(), vec![x.clone()], |comp, args| {
                         comp.process.free(comp.threadid, &args[0]);
                         Value::from(())
                     }).await;
                 }
                 let result = if let Some(oper) = ret.return_operand.as_ref() {
-                    self.get_temp(flow, oper).await
+                    self.get_temp(oper).await
                 } else {
-                    flow.data().constant(flow.backtrace().clone(), Value::from(())).await
+                    self.flow.data().constant(self.flow.backtrace().clone(), Value::from(())).await
                 };
                 DecodeResult::Return(result)
             }
             Terminator::CondBr(condbr) => {
-                if self.get_temp(flow, &condbr.condition).await.await.unwrap_bool() {
+                if self.get_temp(&condbr.condition).await.await.unwrap_bool() {
                     DecodeResult::Jump(&condbr.true_dest)
                 } else {
                     DecodeResult::Jump(&condbr.false_dest)
@@ -414,15 +441,15 @@ impl<'ctx> InterpFrame<'ctx> {
                 panic!("Unreachable");
             }
             Terminator::Invoke(invoke) => {
-                self.decode_call(flow, &invoke.function, &invoke.arguments, Some(&invoke.result)).await;
+                self.decode_call(&invoke.function, &invoke.arguments, Some(&invoke.result)).await;
                 DecodeResult::Jump(&invoke.return_label)
             }
             Terminator::Switch(switch) => {
-                let cond = self.get_temp(flow, &switch.operand).await;
+                let cond = self.get_temp(&switch.operand).await;
                 let cond = cond.await;
                 let mut target = None;
                 for (pat, dest) in switch.dests.iter() {
-                    let (_, pat) = flow.ctx().get_constant(self.ectx, &pat);
+                    let (_, pat) = self.ctx.get_constant(self.frame.ectx, &pat);
                     if pat == cond {
                         target = Some(dest);
                     }
@@ -432,22 +459,7 @@ impl<'ctx> InterpFrame<'ctx> {
             term => todo!("{:?}", term)
         }
     }
-    async fn get_temp<'a>(&'a mut self, flow: &'a FlowCtx<'ctx, 'a>, oper: &'ctx Operand) -> Thunk<'ctx> {
-        match oper {
-            Operand::LocalOperand { name, .. } => {
-                self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
-            }
-            Operand::ConstantOperand(constant) => {
-                let value = flow.ctx().get_constant(self.ectx, constant).1;
-                self.add_thunk(flow, constant.to_string(), None, vec![], move |_, _| value).await
-            }
-            Operand::MetadataOperand => {
-                self.add_thunk(flow, "metadata".to_string(), None, vec![], |_, _| Value::from(())).await
-            }
-        }
-    }
     async fn decode_call<'a>(&'a mut self,
-                             flow: &'a FlowCtx<'ctx, 'a>,
                              function: &'ctx Either<InlineAssembly, Operand>,
                              arguments: &'ctx Vec<(Operand, Vec<ParameterAttribute>)>,
                              dest: Option<&'ctx Name>,
@@ -456,30 +468,27 @@ impl<'ctx> InterpFrame<'ctx> {
             Either::Left(assembly) => todo!("{:?}", assembly),
             Either::Right(fun) => fun,
         };
-        let fun_thunk = self.get_temp(flow, fun).await;
+        let fun_thunk = self.get_temp(fun).await;
         let fun = fun_thunk.clone().await;
-        let fun = flow.ctx().try_reverse_lookup(&fun).unwrap_or_else(|| panic!("Unknown function {:?} {:#?} {:#?}", fun, flow, fun_thunk.full_debug(&flow.ctx())));
-        let fun = flow.ctx().functions.get(&fun).cloned().unwrap_or_else(|| panic!("Unknown function {:?}", fun));
+        let fun = self.ctx.try_reverse_lookup(&fun).unwrap_or_else(|| panic!("Unknown function {:?} {:#?} {:#?}", fun, self.flow, fun_thunk.full_debug(&self.ctx)));
+        let fun = self.ctx.functions.get(&fun).cloned().unwrap_or_else(|| panic!("Unknown function {:?}", fun));
         let mut deps = vec![];
         for (oper, _) in arguments.iter() {
-            deps.push(self.get_temp(flow, oper).await)
+            deps.push(self.get_temp(oper).await)
         }
-        let result = fun.call_imp(flow, &deps).await;
+        let result = fun.call_imp(&self.flow, &deps).await;
         if let Some(dest) = dest {
-            self.temps.insert(dest, result);
+            self.frame.temps.insert(dest, result);
         }
     }
+    async fn get_temp<'flow>(&'flow mut self, oper: &'ctx Operand) -> Thunk<'ctx> {
+        self.frame.get_temp(&self.flow, oper).await
+    }
     async fn add_thunk<'a>(&'a mut self,
-                           flow: &'a FlowCtx<'ctx, 'a>,
-                           name: String,
                            dest: Option<&'ctx Name>,
                            deps: Vec<Thunk<'ctx>>,
                            compute: impl 'ctx + FnOnce(ComputeCtx<'ctx, '_>, &[&Value]) -> Value) -> Thunk<'ctx> {
-        let thunk = flow.data().thunk(name, flow.backtrace().clone(), deps, compute).await;
-        if let Some(dest) = dest {
-            self.temps.insert(dest, thunk.clone());
-        }
-        thunk
+        self.frame.add_thunk(&self.flow, self.name.clone(), dest, deps, compute).await
     }
 }
 
