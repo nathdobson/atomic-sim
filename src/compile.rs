@@ -734,13 +734,13 @@ impl ModuleCompiler {
                 (self.type_map.ptr(self.type_map.get(ty)), self.process.lookup(Some(self.moduleid), name).clone())
             }
             Constant::Undef(typ) => {
-                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout()))
+                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout().bits()))
             }
             Constant::Null(typ) => {
-                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout()))
+                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout().bits()))
             }
             Constant::AggregateZero(typ) => {
-                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout()))
+                (self.type_map.get(typ), Value::zero(self.type_map.get(typ).layout().bits()))
             }
             Constant::Struct { name, values, is_packed, } => {
                 let children = values.iter().map(|c| self.compile_const(c)).collect::<Vec<_>>();
@@ -932,7 +932,7 @@ impl Compiler {
                 assert!(c.layout().bit_align() <= layout.bit_align());
                 value
             } else {
-                Value::zero(layout)
+                Value::zero(layout.bits())
             };
             self.process.store(ThreadId(0), &loc, &value, None);
         }

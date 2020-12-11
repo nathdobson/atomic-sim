@@ -13,7 +13,6 @@ use bitvec::slice::BitSlice;
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Value {
-    layout: Layout,
     vec: BitVec<Lsb0, u8>,
 }
 
@@ -27,8 +26,7 @@ pub fn add_u64_i64(x: u64, y: i64) -> u64 {
 
 impl Value {
     pub fn as_u128(&self) -> u128 {
-        assert_eq!(self.layout.bits(), self.vec.len() as u64);
-        if self.layout.bits() == 0 {
+        if self.vec.is_empty() {
             0
         } else {
             self.vec[0..128.min(self.vec.len())].load_le()
@@ -47,7 +45,7 @@ impl Value {
     pub fn as_u64(&self) -> u64 { self.as_u128() as u64 }
     pub fn as_i64(&self) -> i64 { self.as_i128() as i64 }
     pub fn bits(&self) -> u64 {
-        self.layout.bits()
+        self.vec.len() as u64
     }
     pub fn unwrap_int(&self, expected_bits: u64) -> u128 {
         assert_eq!(self.bits(), expected_bits);
@@ -65,40 +63,35 @@ impl Value {
     pub fn unwrap_u128(&self) -> u128 { self.unwrap_int(128) as u128 }
     pub fn unwrap_i128(&self) -> i128 { self.unwrap_int(128) as i128 }
 
-    pub fn from_bits(layout: Layout, vec: BitVec<Lsb0, u8>) -> Self {
-        assert_eq!(layout.bits(), vec.len() as u64);
-        Self { layout, vec }
+    pub fn from_bits(vec: BitVec<Lsb0, u8>) -> Self {
+        Self { vec }
     }
     pub fn new(bits: u64, value: u128) -> Self {
         let mut vec = BitVec::repeat(false, bits as usize);
         if bits > 0 {
             vec[0..bits.min(128) as usize].store(value);
         }
-        let layout = Layout::of_int(bits);
-        Self::from_bits(layout, vec)
+        Self::from_bits(vec)
     }
-    pub fn zero(layout: Layout) -> Self {
-        Self::from_bits(layout, BitVec::repeat(false, layout.bits() as usize))
+    pub fn zero(bits: u64) -> Self {
+        Self::from_bits(BitVec::repeat(false, bits as usize))
     }
     pub fn as_bytes(&self) -> &[u8] {
         self.vec.as_slice()
     }
     pub fn as_bits(&self) -> &BitSlice<Lsb0, u8> { self.vec.as_bitslice() }
-    pub fn from_bytes(bytes: &[u8], layout: Layout) -> Self {
-        assert_eq!(bytes.len() as u64, layout.bytes());
-        let mut bits = BitVec::from_vec(bytes.to_vec());
-        bits.truncate(layout.bits() as usize);
-        Self::from_bits(layout, bits)
+    pub fn from_bytes(bytes: &[u8], bits: u64) -> Self {
+        assert_eq!(bytes.len() as u64, (bits + 7) / 8);
+        let mut bit_vec = BitVec::from_vec(bytes.to_vec());
+        bit_vec.truncate(bits as usize);
+        Self::from_bits(bit_vec)
     }
-    pub fn from_bytes_unaligned(bytes: &[u8]) -> Self {
-        Self::from_bytes(bytes, Layout::from_bytes(bytes.len() as u64, 1))
-    }
-    pub fn layout(&self) -> Layout {
-        self.layout
+    pub fn from_bytes_exact(bytes: &[u8]) -> Self {
+        Self::from_bytes(bytes, (bytes.len() * 8) as u64)
     }
     pub fn aggregate(class: &Class, vs: impl Iterator<Item=Value>) -> Self {
         let layout = class.layout();
-        let mut result = Value::zero(layout);
+        let mut result = Value::zero(layout.bits());
         for (i, v) in vs.enumerate() {
             result.insert_bits(class.element(i as i64).bit_offset, &v);
         }
@@ -106,12 +99,12 @@ impl Value {
     }
     pub fn extract(&self, class: &Class, index: i64) -> Value {
         let element = class.element(index);
-        self.extract_bits(element.bit_offset, element.class.layout())
+        self.extract_bits(element.bit_offset, element.class.layout().bits())
     }
-    pub fn extract_bits(&self, offset: i64, layout: Layout) -> Value {
+    pub fn extract_bits(&self, offset: i64, len: u64) -> Value {
         Value::from_bits(
-            layout,
-            BitVec::from_bitslice(&self.vec[offset as usize..offset as usize + layout.bits() as usize]),
+            BitVec::from_bitslice(
+                &self.vec[offset as usize..offset as usize + len as usize]),
         )
     }
     pub fn insert_bits(&mut self, offset: i64, value: &Value) {
@@ -120,7 +113,7 @@ impl Value {
     pub fn ucast(&self, layout: Layout) -> Value {
         let mut vec = self.vec.clone();
         vec.resize(layout.bits() as usize, false);
-        Value::from_bits(layout, vec)
+        Value::from_bits(vec)
     }
 }
 

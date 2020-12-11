@@ -108,7 +108,7 @@ impl Memory {
                 break;
             }
         }
-        Value::from_bytes(&bytes, layout)
+        Value::from_bytes_exact(&bytes)
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
         format!("{:?}", self.find_alloc(ptr))
@@ -128,9 +128,7 @@ impl Debug for StoreLog {
         f.debug_struct("StoreLog")
             .field("pos", &Value::from(self.pos))
             .field("value",
-                   &Value::from_bytes(
-                       &self.value,
-                       Layout::from_bytes(self.value.len() as u64, 1)))
+                   &Value::from_bytes_exact(&self.value))
             .finish()
     }
 }

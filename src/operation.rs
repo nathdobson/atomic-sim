@@ -236,7 +236,7 @@ pub fn call_scalar_lshr(v1: &Value, v2: &Value) -> Value {
     let shift = v2.as_u64() as usize;
     let mut output = BitVec::repeat(false, width);
     output[..width - shift].copy_from_bitslice(&v1.as_bits()[shift..]);
-    Value::from_bits(v1.layout(), output)
+    Value::from_bits(output)
 }
 
 fn call_scalar_binop_unsigned<T1, T8, T16, T32, T64, T128>

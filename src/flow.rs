@@ -68,7 +68,7 @@ impl FlowCtx {
         cstr.push(0);
         let layout = Layout::from_bytes(cstr.len() as u64, 1);
         let res = self.alloc(layout).await;
-        self.store(&res, &Value::from_bytes(&cstr, layout)).await;
+        self.store(&res, &Value::from_bytes(&cstr, layout.bits())).await;
         res
     }
 
