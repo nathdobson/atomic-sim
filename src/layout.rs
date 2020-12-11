@@ -31,22 +31,22 @@ impl Layout {
         assert!(bit_align.is_power_of_two());
         Self { bits, bit_align }
     }
-    fn extend(&self, packing: Packing, other: Self) -> (Self, u64) {
+    pub fn extend(&self, packing: Packing, other: Self) -> (Self, i64) {
         match packing {
             Packing::None => {
                 let offset = align_to(self.bits, other.bit_align);
                 (Self {
                     bits: offset + other.bits,
                     bit_align: self.bit_align.max(other.bit_align),
-                }, offset)
+                }, offset as i64)
             }
             Packing::Bit => {
                 let offset = self.bits;
-                (Self { bits: offset + other.bits, bit_align: 8 }, offset)
+                (Self { bits: offset + other.bits, bit_align: 8 }, offset as i64)
             }
             Packing::Byte => {
                 let offset = align_to(self.bits, 8);
-                (Self { bits: offset + other.bits, bit_align: 8 }, offset)
+                (Self { bits: offset + other.bits, bit_align: 8 }, offset as i64)
             }
         }
     }
@@ -59,10 +59,15 @@ impl Layout {
     pub fn bit_align(&self) -> u64 { self.bit_align }
     pub fn byte_align(&self) -> u64 { (self.bit_align + 7) / 8 }
     pub fn of_int(bits: u64) -> Layout {
-        Self::from_bits(bits, bits.max(8))
+        let align = bits.max(8).next_power_of_two();
+        Self::from_bits(bits, align)
     }
+    pub fn of_func() -> Layout { Self::from_bytes(256, 1) }
     pub fn pad_to_align(&self) -> Self {
         Layout::from_bits(align_to(self.bits, self.bit_align), self.bit_align)
+    }
+    pub fn align_to_bits(&self, align_bits: u64) -> Self {
+        Layout::from_bits(self.bits, self.bit_align.max(align_bits))
     }
     pub fn repeat(&self, packing: Packing, n: u64) -> Self {
         match packing {
@@ -81,31 +86,9 @@ impl Layout {
     }
 }
 
-impl AggrLayout {
-    pub fn new(packing: Packing, iter: impl Iterator<Item=Layout>) -> Self {
-        let mut result = Layout::from_bits(0, 8);
-        let mut bit_offsets = vec![];
-        for layout in iter {
-            let (new, off) = result.extend(packing, layout);
-            result = new;
-            bit_offsets.push(off);
-        }
-        Self {
-            bit_offsets,
-            layout: result.pad_to_align(),
-        }
-    }
-    pub fn layout(&self) -> Layout {
-        self.layout
-    }
-    pub fn bit_offset(&self, index: usize) -> u64 {
-        self.bit_offsets[index]
-    }
-}
-
 impl Debug for Layout {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "b{}%{}", self.bits, self.bit_align)
+        write!(f, "b{}/{}", self.bits, self.bit_align)
     }
 }
 

@@ -1,46 +1,53 @@
 use std::rc::Rc;
-use crate::ctx::Ctx;
-use crate::data::DataFlow;
 use crate::backtrace::{Backtrace, BacktraceFrame};
 use crate::value::Value;
 use crate::layout::Layout;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
+use crate::data::DataFlow;
+use crate::process::{Process};
+use llvm_ir::DebugLoc;
 
 #[derive(Clone)]
-pub struct FlowCtx<'ctx, 'flow> {
-    ctx: &'flow Rc<Ctx<'ctx>>,
-    data: &'flow DataFlow<'ctx>,
-    backtrace: Backtrace<'ctx>,
+pub struct FlowCtx {
+    process: Process,
+    data: DataFlow,
+    backtrace: Backtrace,
 }
 
-impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
-    pub fn new(ctx: &'flow Rc<Ctx<'ctx>>,
-               data: &'flow DataFlow<'ctx>,
-               backtrace: Backtrace<'ctx>) -> Self {
-        FlowCtx { ctx, data, backtrace }
+impl FlowCtx {
+    pub fn new(process: Process,
+               data: DataFlow,
+               backtrace: Backtrace) -> Self {
+        FlowCtx { process, data, backtrace }
     }
 
-    pub async fn invoke(&self, fun: &'flow Value, fargs: &[&Value]) -> Value {
+    pub async fn invoke(&self, fun: &Value, fargs: &[&Value]) -> Value {
         let mut thunks = Vec::with_capacity(fargs.len());
         for farg in fargs.iter() {
             thunks.push(self.data.constant(self.backtrace.clone(), (*farg).clone()).await);
         }
-        self.ctx.reverse_lookup_fun(&fun)
-            .call_imp(&self.with_frame(BacktraceFrame { ip: 0xFFFF_FFFF, ..BacktraceFrame::default() }), &thunks).await.await
+        self.process.reverse_lookup_fun(&fun)
+            .call_imp(&self.with_frame(BacktraceFrame::new(0xFFFF_FFFF, DebugLoc {
+                line: 0,
+                col: None,
+                filename: "<native>".to_string(),
+                directory: None,
+            })), &thunks).await.await
     }
 
-    pub fn with_frame(&self, frame: BacktraceFrame<'ctx>) -> Self {
-        Self {
-            ctx: self.ctx,
-            data: self.data,
+    pub fn with_frame(&self, frame: BacktraceFrame) -> Self {
+        FlowCtx {
+            process: self.process.clone(),
+            data: self.data.clone(),
             backtrace: self.backtrace.prepend(frame),
         }
     }
 
     pub async fn alloc(&self, layout: Layout) -> Value {
+        let threadid = self.data.threadid();
         self.data.thunk(format!("alloc({:?})", layout), self.backtrace.clone(), vec![], move |comp, _| {
-            comp.process.alloc(comp.threadid, layout)
+            comp.process.alloc(threadid, layout)
         }).await.await
     }
 
@@ -51,8 +58,8 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
     }
 
     pub async fn store(&self, address: &Value, value: &Value) {
-        self.data.store(self.backtrace.clone(),self.data.constant(self.backtrace.clone(),address.clone()).await,
-                        self.data.constant(self.backtrace.clone(),value.clone()).await,
+        self.data.store(self.backtrace.clone(), self.data.constant(self.backtrace.clone(), address.clone()).await,
+                        self.data.constant(self.backtrace.clone(), value.clone()).await,
                         None).await.await;
     }
 
@@ -67,10 +74,10 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
 
     pub async fn strlen(&self, string: &Value) -> Value {
         for i in 0.. {
-            let ptr = self.ctx().value_from_address(string.as_u64() + i);
+            let ptr = self.process.value_from_address(string.as_u64() + i);
             let v = self.load(&ptr, Layout::from_bytes(1, 1)).await;
             if v.unwrap_u8() as u32 == 0 {
-                return self.ctx().value_from_address(i);
+                return self.process.value_from_address(i);
             }
         }
         panic!()
@@ -83,23 +90,19 @@ impl<'ctx, 'flow> FlowCtx<'ctx, 'flow> {
                       Layout::from_bytes(len.as_u64(), 1)).await.as_bytes().to_vec()).unwrap()
     }
 
-
-    pub fn ctx(&self) -> &'flow Rc<Ctx<'ctx>> {
-        self.ctx
+    pub fn data(&self) -> &DataFlow {
+        &self.data
     }
-    pub fn data(&self) -> &'flow DataFlow<'ctx> {
-        self.data
-    }
-    pub fn backtrace(&self) -> &Backtrace<'ctx> {
+    pub fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
 }
 
 
-impl<'ctx, 'flow> Debug for FlowCtx<'ctx, 'flow> {
+impl Debug for FlowCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for frame in self.backtrace.iter() {
-            write!(f, "{:?}\n", self.ctx.reverse_lookup(&self.ctx.value_from_address(frame.ip)))?;
+            write!(f, "{:?}\n", self.process.reverse_lookup(&self.process.value_from_address(frame.ip())))?;
         }
         Ok(())
     }

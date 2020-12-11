@@ -1,36 +1,37 @@
 use std::collections::HashMap;
 use crate::value::Value;
-use crate::memory::{Memory};
 use crate::layout::Layout;
-use crate::ctx::EvalCtx;
 use llvm_ir::module::Linkage;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::collections::hash_map::Entry;
+use std::cell::RefCell;
+use crate::memory::Memory;
 
-pub struct SymbolTable<'ctx> {
+pub struct SymbolTable {
     forward: HashMap<Symbol, Value>,
     reverse: HashMap<Value, Symbol>,
-    phantom: PhantomData<&'ctx ()>,
 }
+
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Hash, Debug)]
+pub struct ModuleId(pub usize);
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum Symbol {
     External(String),
-    Internal(usize, String),
+    Internal(ModuleId, String),
 }
 
-impl<'ctx> SymbolTable<'ctx> {
+impl SymbolTable {
     pub fn new() -> Self {
-        Self {
+        SymbolTable{
             forward: HashMap::new(),
             reverse: HashMap::new(),
-            phantom: PhantomData,
         }
     }
-    pub fn add_symbol(&mut self, memory: &mut Memory<'ctx>, name: Symbol, layout: Layout) -> Value {
+    pub fn add_symbol(&mut self, memory: &mut Memory, name: Symbol, layout: Layout) -> Value {
         let address = memory.alloc(layout);
         assert!(self.forward.insert(name.clone(), address.clone()).is_none());
         assert!(self.reverse.insert(address.clone(), name).is_none());
@@ -48,25 +49,25 @@ impl<'ctx> SymbolTable<'ctx> {
     pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol> {
         self.reverse.get(&address).cloned()
     }
-    pub fn lookup(&self, ectx: EvalCtx, name: &str) -> &Value {
-        if let Some(module) = ectx.module {
+    pub fn lookup(&self, module: Option<ModuleId>, name: &str) -> Value {
+        if let Some(module) = module {
             if let Some(internal) = self.forward.get(&Symbol::Internal(module, name.to_string())) {
-                return internal;
+                return internal.clone();
             }
         }
         if let Some(external) = self.forward.get(&Symbol::External(name.to_string())) {
-            external
+            external.clone()
         } else {
             panic!("No symbol named {:?}", name)
         }
     }
-    pub fn lookup_symbol(&self, sym: &Symbol) -> &Value {
-        self.forward.get(sym).unwrap_or_else(|| panic!("No symbol {:?}", sym))
+    pub fn lookup_symbol(&self, sym: &Symbol) -> Value {
+        self.forward.get(sym).unwrap_or_else(|| panic!("No symbol {:?}", sym)).clone()
     }
 }
 
 impl Symbol {
-    pub fn new(linkage: Linkage, module: usize, name: &str) -> Self {
+    pub fn new(linkage: Linkage, module: ModuleId, name: &str) -> Self {
         match linkage {
             Linkage::Private | Linkage::Internal => Symbol::Internal(module, name.to_string()),
             Linkage::External => Symbol::External(name.to_string()),
@@ -79,7 +80,7 @@ impl Debug for Symbol {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Symbol::External(n) => write!(f, "{}", n),
-            Symbol::Internal(i, n) => write!(f, "[{}]{}", i, n),
+            Symbol::Internal(i, n) => write!(f, "[{:?}]{}", i, n),
         }
     }
 }

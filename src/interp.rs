@@ -2,7 +2,7 @@ use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator,
 use std::collections::HashMap;
 use crate::ctx::{EvalCtx, Ctx};
 use crate::function::{Func};
-use crate::data::{DataFlow, Thunk};
+use crate::data::{Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use llvm_ir::instruction::{RMWBinOp, Sub, Mul, UDiv, SDiv, URem, SRem, Add, And, Or, Shl, LShr, AShr, ICmp, Xor, SExt, ZExt, Trunc, PtrToInt, IntToPtr, BitCast, InsertValue, AtomicRMW, Select, ExtractValue, CmpXchg, Fence, InlineAssembly, ExtractElement, InsertElement, ShuffleVector};
@@ -18,23 +18,6 @@ use crate::compute::ComputeCtx;
 use crate::symbols::Symbol;
 use crate::layout::{AggrLayout, Layout, Packing};
 use crate::arith::{BinOp, scast, ucast};
-
-#[derive(Debug)]
-pub struct InterpFunc<'ctx> {
-    pub sym: Symbol,
-    pub src: &'ctx Function,
-    pub ectx: EvalCtx,
-}
-
-impl<'ctx> InterpFunc<'ctx> {
-    pub fn new(ectx: EvalCtx, sym: Symbol, fun: &'ctx Function) -> Self {
-        InterpFunc {
-            sym,
-            src: &fun,
-            ectx: ectx,
-        }
-    }
-}
 
 struct InterpFrame<'ctx> {
     fp: u64,

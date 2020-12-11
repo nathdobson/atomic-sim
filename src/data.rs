@@ -1,37 +1,36 @@
 use futures::pending;
-use crate::ctx::{Ctx};
 use crate::value::Value;
-use crate::process::Process;
 use std::fmt::{Formatter, Debug};
 use std::{fmt, mem, iter, thread};
-use crate::thread::{Thread, ThreadId};
 use std::collections::{HashMap, BTreeMap, HashSet, BTreeSet};
 use std::rc::Rc;
 use std::cell::{RefCell, Ref};
-use std::borrow::BorrowMut;
 use llvm_ir::instruction::Atomicity;
 use crate::layout::Layout;
 use std::future::Future;
 use futures::task::{Context, Poll};
 use std::pin::Pin;
-use crate::compute::ComputeCtx;
 use std::any::type_name_of_val;
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
-use crate::backtrace::Backtrace;
 use defer::defer;
+use crate::compute::ComputeCtx;
+use crate::backtrace::Backtrace;
+use crate::process::Process;
+use crate::thread::{Thread, ThreadId};
+use std::ops::Deref;
 
 const PIPELINE_SIZE: usize = 1;
 
-pub struct DataFlowInner<'ctx> {
+pub struct DataFlowInner {
+    process: Process,
     threadid: ThreadId,
     seq: usize,
-    thunks: BTreeMap<usize, Thunk<'ctx>>,
+    thunks: BTreeMap<usize, Thunk>,
 }
 
-pub struct DataFlow<'ctx> {
-    inner: RefCell<DataFlowInner<'ctx>>,
-}
+#[derive(Clone)]
+pub struct DataFlow(Rc<RefCell<DataFlowInner>>);
 
 pub enum LoadOrdering {
     Unordered,
@@ -49,29 +48,30 @@ pub enum StoreOrdering {
     NotAtomic,
 }
 
-pub enum ThunkState<'ctx> {
-    Pending(Box<dyn 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value>),
+pub enum ThunkState {
+    Pending(Box<dyn FnOnce(&ComputeCtx, &[&Value]) -> Value>),
     Load { layout: Layout },
     Store,
-    Modify(Box<dyn 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a Value) -> (Value, Value)>),
+    Modify(Box<dyn FnOnce(&ComputeCtx, &Value) -> (Value, Value)>),
     Ready(Value),
     Sandbag,
 }
 
-pub struct ThunkInner<'ctx> {
-    pub threadid: ThreadId,
-    pub seq: usize,
-    pub deps: Vec<Thunk<'ctx>>,
-    pub address: Option<Thunk<'ctx>>,
-    pub name: String,
-    pub backtrace: Backtrace<'ctx>,
-    pub value: RefCell<ThunkState<'ctx>>,
+pub struct ThunkInner {
+    process: Process,
+    threadid: ThreadId,
+    seq: usize,
+    deps: Vec<Thunk>,
+    address: Option<Thunk>,
+    name: String,
+    backtrace: Backtrace,
+    value: RefCell<ThunkState>,
 }
 
 #[derive(Clone)]
-pub struct Thunk<'ctx>(Rc<ThunkInner<'ctx>>);
+pub struct Thunk(Rc<ThunkInner>);
 
-impl<'ctx> Thunk<'ctx> {
+impl Thunk {
     pub fn try_get(&self) -> Option<&Value> {
         let r = self.0.value.borrow();
         match &*r {
@@ -86,7 +86,7 @@ impl<'ctx> Thunk<'ctx> {
             _ => unreachable!()
         }
     }
-    pub fn step<'a>(&'a self, comp: ComputeCtx<'ctx, 'a>) -> bool {
+    pub fn step<'a>(&'a self, comp: &ComputeCtx) -> bool {
         let args = self.0.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
         match &*self.0.value.borrow() {
             ThunkState::Ready(_) => panic!("Already ready"),
@@ -107,7 +107,7 @@ impl<'ctx> Thunk<'ctx> {
         }
         true
     }
-    pub fn all_deps(&self) -> Vec<&Thunk<'ctx>> {
+    pub fn all_deps(&self) -> Vec<&Thunk> {
         let mut frontier: Vec<&Thunk> = vec![self];
         let mut all = BTreeSet::new();
         while let Some(next) = frontier.pop() {
@@ -119,28 +119,27 @@ impl<'ctx> Thunk<'ctx> {
         }
         all.into_iter().collect()
     }
-    pub fn backtrace(&self) -> &Backtrace<'ctx> {
+    pub fn backtrace(&self) -> &Backtrace {
         &self.0.backtrace
     }
-    pub fn full_debug(&self, ctx: &Ctx<'ctx>) -> (Vec<&Thunk<'ctx>>, impl Debug + 'ctx) {
-        (self.all_deps(), self.backtrace().full_debug(ctx))
+    pub fn full_debug<'a>(&'a self) -> impl 'a + Debug {
+        (self, self.all_deps(), self.backtrace())
     }
 }
 
-impl<'ctx> DataFlow<'ctx> {
-    pub fn new(threadid: ThreadId) -> Self {
-        DataFlow {
-            inner: RefCell::new(DataFlowInner { threadid, seq: 0, thunks: BTreeMap::new() }),
-        }
+impl DataFlow {
+    pub fn new(process: Process, threadid: ThreadId) -> Self {
+        DataFlow(Rc::new(RefCell::new(DataFlowInner { process, threadid, seq: 0, thunks: BTreeMap::new() })))
     }
-    pub async fn thunk(&self, name: String, backtrace: Backtrace<'ctx>, deps: Vec<Thunk<'ctx>>, compute: impl 'ctx + for<'a> FnOnce(ComputeCtx<'ctx, 'a>, &'a [&'a Value]) -> Value) -> Thunk<'ctx> {
-        while self.inner.borrow().thunks.len() >= PIPELINE_SIZE {
+    pub async fn thunk(&self, name: String, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
+        while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
-        let mut this = self.inner.borrow_mut();
+        let mut this = self.0.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
-        let thunk: Thunk<'ctx> = Thunk(Rc::new(ThunkInner {
+        let thunk: Thunk = Thunk(Rc::new(ThunkInner {
+            process: this.process.clone(),
             threadid: this.threadid,
             seq,
             deps,
@@ -152,42 +151,42 @@ impl<'ctx> DataFlow<'ctx> {
         this.thunks.insert(seq, thunk.clone());
         thunk
     }
-    pub async fn constant(&self, backtrace: Backtrace<'ctx>, v: Value) -> Thunk<'ctx> {
+    pub async fn constant(&self, backtrace: Backtrace, v: Value) -> Thunk {
         self.thunk("constant".to_string(), backtrace, vec![], |_, _| v).await
     }
-    pub async fn store<'a>(&'a self, backtrace: Backtrace<'ctx>, address: Thunk<'ctx>, value: Thunk<'ctx>, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+    pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
+        let threadid = self.0.borrow().threadid;
         self.thunk("store".to_string(), backtrace, vec![address, value], move |comp, args| {
-            comp.process.store(comp.threadid, args[0], args[1], atomicity);
+            comp.process.store(threadid, args[0], args[1], atomicity);
             Value::from(())
         }).await
     }
-    pub async fn load<'a>(&'a self, backtrace: Backtrace<'ctx>, address: Thunk<'ctx>, layout: Layout, atomicity: Option<&'ctx Atomicity>) -> Thunk<'ctx> {
+    pub async fn load<'a>(&'a self, backtrace: Backtrace, address: Thunk, layout: Layout, atomicity: Option<Atomicity>) -> Thunk {
+        let threadid = self.0.borrow().threadid;
         self.thunk("load".to_string(), backtrace, vec![address], move |comp, args| {
-            comp.process.load(comp.threadid, args[0], layout, atomicity)
+            comp.process.load(threadid, args[0], layout, atomicity)
         }).await
     }
     pub fn len(&self) -> usize {
-        self.inner.borrow().thunks.len()
+        self.0.borrow().thunks.len()
     }
     pub fn seq(&self) -> usize {
-        self.inner.borrow().seq
+        self.0.borrow().seq
     }
-    pub fn step(&self, threadid: ThreadId) -> impl FnOnce(&mut Process<'ctx>) -> bool {
-        let thunk = self.inner.borrow_mut().thunks.pop_first();
-        move |process| {
-            if let Some((_, thunk)) = thunk {
-                let ctx = process.ctx.clone();
-                let thunk2 = thunk.clone();
-                let _d = defer(move || if thread::panicking() {
-                    println!("Panic while forcing {:#?}", thunk2.full_debug(&ctx));
-                });
-                thunk.step(ComputeCtx { process: process, threadid });
-                true
-            } else {
-                false
-            }
+    pub fn step(&self) -> bool {
+        let thunk = self.0.borrow_mut().thunks.pop_first();
+        if let Some((_, thunk)) = thunk {
+            let thunk2 = thunk.clone();
+            let _d = defer(move || if thread::panicking() {
+                println!("Panic while forcing {:#?}", thunk2.full_debug());
+            });
+            thunk.step(&ComputeCtx { process: self.0.borrow().process.clone() });
+            true
+        } else {
+            false
         }
     }
+    pub fn threadid(&self) -> ThreadId { self.0.borrow().threadid }
 }
 
 struct DebugFlat<T: Debug>(T);
@@ -198,7 +197,7 @@ impl<T: Debug> Debug for DebugFlat<T> {
     }
 }
 
-impl<'ctx> Debug for Thread<'ctx> {
+impl Debug for Thread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Stack")
             .finish()
@@ -206,7 +205,7 @@ impl<'ctx> Debug for Thread<'ctx> {
 }
 
 
-struct DebugDeps<'a>(&'a [Rc<Thunk<'a>>]);
+struct DebugDeps<'a>(&'a [Rc<Thunk>]);
 
 impl<'a> Debug for DebugDeps<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -215,13 +214,13 @@ impl<'a> Debug for DebugDeps<'a> {
 }
 
 
-impl<'ctx> Debug for Thunk<'ctx> {
+impl Debug for Thunk {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}_{} = {} {:?} [{:?}]", self.0.threadid, self.0.seq, self.0.name, self.0.value.borrow(), self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>())
     }
 }
 
-impl<'ctx> Debug for ThunkState<'ctx> {
+impl Debug for ThunkState {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             ThunkState::Pending(_) => write!(f, "Pending"),
@@ -232,7 +231,7 @@ impl<'ctx> Debug for ThunkState<'ctx> {
     }
 }
 
-impl<'ctx> Future for Thunk<'ctx> {
+impl Future for Thunk {
     type Output = Value;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -244,27 +243,27 @@ impl<'ctx> Future for Thunk<'ctx> {
     }
 }
 
-impl<'ctx> Hash for Thunk<'ctx> {
+impl Hash for Thunk {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.seq.hash(state);
     }
 }
 
-impl<'ctx> Eq for Thunk<'ctx> {}
+impl Eq for Thunk {}
 
-impl<'ctx> PartialEq for Thunk<'ctx> {
+impl PartialEq for Thunk {
     fn eq(&self, other: &Self) -> bool {
         self.0.seq == other.0.seq
     }
 }
 
-impl<'ctx> Ord for Thunk<'ctx> {
+impl Ord for Thunk {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.seq.cmp(&other.0.seq)
     }
 }
 
-impl<'ctx> PartialOrd for Thunk<'ctx> {
+impl PartialOrd for Thunk {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.0.seq.partial_cmp(&other.0.seq)
     }

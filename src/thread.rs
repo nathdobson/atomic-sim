@@ -4,7 +4,6 @@ use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
 use std::fmt::{Debug, Formatter, Display};
 use std::{fmt, iter, mem, ops};
-use std::borrow::BorrowMut;
 use either::Either;
 use std::cell::{Cell, RefCell, Ref};
 use llvm_ir::instruction::Add;
@@ -15,61 +14,63 @@ use llvm_ir::function::ParameterAttribute;
 use std::mem::size_of;
 use crate::value::{Value, add_u64_i64};
 use crate::memory::{Memory};
-use crate::ctx::{Ctx, EvalCtx};
-use crate::process::Process;
 use std::future::Future;
 use std::task::{Context, Poll};
 use std::pin::Pin;
-use crate::data::{DataFlow};
 use futures::{pending, FutureExt};
-use crate::data::Thunk;
+use crate::data::{Thunk, DataFlow};
 use futures::future::{LocalBoxFuture, Fuse};
 use futures::task::noop_waker_ref;
 use crate::symbols::Symbol;
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
+use crate::process::{Process};
 
-pub struct Thread<'ctx> {
+pub struct ThreadInner {
     threadid: ThreadId,
-    control: Option<LocalBoxFuture<'ctx, ()>>,
-    data: Rc<DataFlow<'ctx>>,
+    control: RefCell<Option<LocalBoxFuture<'static, ()>>>,
+    data: DataFlow,
 }
+
+#[derive(Clone)]
+pub struct Thread(Rc<ThreadInner>);
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct ThreadId(pub usize);
 
-impl<'ctx> Thread<'ctx> {
-    pub fn new(ctx: Rc<Ctx<'ctx>>, main: Symbol, threadid: ThreadId, params: &[Value]) -> Self {
-        let data = Rc::new(DataFlow::new(threadid));
-        let main = ctx.functions.get(&main).unwrap().clone();
+impl Thread {
+    pub fn new(process: Process, threadid: ThreadId, main: Symbol, params: &[Value]) -> Self {
+        let data = DataFlow::new(process.clone(), threadid);
+        let main = process.lookup_symbol(&main).clone();
+        let main = process.reverse_lookup_fun(&main);
         let params = params.to_vec();
-        let control: Option<Pin<Box<dyn futures::Future<Output=()>>>> = Some(Box::pin({
+        let control: RefCell<Option<Pin<Box<dyn futures::Future<Output=()>>>>> = RefCell::new(Some(Box::pin({
             let data = data.clone();
             async move {
                 let mut deps = vec![];
                 for value in params {
                     let value = value.clone();
-                    deps.push(data.constant(Backtrace::Nil, value).await);
+                    deps.push(data.constant(Backtrace::empty(), value).await);
                 }
-                main.call_imp(&FlowCtx::new(&ctx, &data, Backtrace::empty()), &deps).await;
+                main.call_imp(&FlowCtx::new(process.clone(), data, Backtrace::empty()), &deps).await;
             }
-        }));
-        Thread { threadid, control, data }
+        })));
+        Thread(Rc::new(ThreadInner { threadid, control, data }))
     }
-    pub fn step(&mut self) -> impl FnOnce(&mut Process<'ctx>) -> bool {
-        let step_control = if let Some(control) = &mut self.control {
-            if control.as_mut().poll(&mut Context::from_waker(noop_waker_ref())).is_ready() {
-                self.control = None;
+    pub fn step(&self) -> bool {
+        let step_control = {
+            let mut control = self.0.control.borrow_mut();
+            if let Some(fut) = &mut *control {
+                if fut.as_mut().poll(&mut Context::from_waker(noop_waker_ref())).is_ready() {
+                    *control = None;
+                }
+                true
+            } else {
+                false
             }
-            true
-        } else {
-            false
         };
-        let cont = self.data.step(self.threadid);
-        move |process| {
-            let step_data = cont(process);
-            step_control || step_data
-        }
+        let step_data = self.0.data.step();
+        step_control || step_data
     }
 }
 

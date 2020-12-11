@@ -3,53 +3,81 @@ use std::fmt::{Debug, Formatter};
 use std::fmt;
 use crate::value::Value;
 use std::marker::PhantomData;
-use crate::ctx::Ctx;
+use crate::process::Process;
+use llvm_ir::DebugLoc;
 
-#[derive(Clone)]
-pub enum Backtrace<'ctx> {
+enum BacktraceInner {
     Nil,
     Cons {
-        frame: BacktraceFrame<'ctx>,
-        next: Rc<Backtrace<'ctx>>,
+        frame: BacktraceFrame,
+        next: Backtrace,
     },
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct BacktraceFrame<'ctx> {
-    //pub name: &'ctx str,
+#[derive(Clone)]
+pub struct Backtrace(Rc<BacktraceInner>);
+
+#[derive(Debug)]
+struct BacktraceFrameInner {
     pub ip: u64,
-    pub phantom: PhantomData<&'ctx ()>,
+    pub loc: DebugLoc,
 }
 
-pub struct Iter<'ctx, 'bt> {
-    backtrace: &'bt Backtrace<'ctx>,
+#[derive(Clone)]
+pub struct BacktraceFrame(Rc<BacktraceFrameInner>);
+
+pub struct Iter<'bt> {
+    backtrace: &'bt Backtrace,
 }
 
-impl<'ctx> Backtrace<'ctx> {
+impl Backtrace {
     pub fn empty() -> Self {
-        Backtrace::Nil
+        Backtrace(Rc::new(BacktraceInner::Nil))
     }
-    pub fn prepend(&self, frame: BacktraceFrame<'ctx>) -> Self {
-        Backtrace::Cons {
+    pub fn prepend(&self, frame: BacktraceFrame) -> Self {
+        Backtrace(Rc::new(BacktraceInner::Cons {
             frame,
-            next: Rc::new(self.clone()),
-        }
+            next: self.clone(),
+        }))
     }
-    pub fn iter(&self) -> Iter<'ctx, '_> {
+    pub fn iter(&self) -> Iter<'_> {
         Iter { backtrace: self }
     }
-    pub fn full_debug(&self, ctx: &Ctx<'ctx>) -> impl Debug + 'ctx {
-        self.iter().map(|f| ctx.reverse_lookup(&ctx.value_from_address(f.ip))).collect::<Vec<_>>()
-    }
 }
 
-impl<'ctx, 'bt> Iterator for Iter<'ctx, 'bt> {
-    type Item = &'bt BacktraceFrame<'ctx>;
+impl BacktraceFrame {
+    pub fn new(ip: u64, loc: DebugLoc) -> Self {
+        BacktraceFrame(Rc::new(BacktraceFrameInner { ip, loc }))
+    }
+    pub fn ip(&self) -> u64 {
+        self.0.ip
+    }
+    pub fn loc(&self) -> &DebugLoc {
+        &self.0.loc
+    }
+}
+//
+// impl Default for BacktraceFrame {
+//     fn default() -> Self {
+//         BacktraceFrame(Rc::new(BacktraceFrameInner {
+//             ip: 0xFFFF_FFFF,
+//             loc: DebugLoc {
+//                 line: 0,
+//                 col: None,
+//                 filename: "<native>".to_string(),
+//                 directory: None,
+//             },
+//         }))
+//     }
+// }
+
+impl<'ctx, 'bt> Iterator for Iter<'bt> {
+    type Item = &'bt BacktraceFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match &self.backtrace {
-            Backtrace::Nil => None,
-            Backtrace::Cons { frame, next } => {
+        match &*self.backtrace.0 {
+            BacktraceInner::Nil => None,
+            BacktraceInner::Cons { frame, next } => {
                 self.backtrace = next;
                 Some(frame)
             }
@@ -57,8 +85,17 @@ impl<'ctx, 'bt> Iterator for Iter<'ctx, 'bt> {
     }
 }
 
-impl<'ctx> Debug for Backtrace<'ctx> {
+impl Debug for Backtrace {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Debug for BacktraceFrame {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BacktraceFrame")
+            .field("ip", &self.0.ip)
+            .field("loc", &self.0.loc)
+            .finish()
     }
 }

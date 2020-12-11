@@ -3,11 +3,13 @@ use std::mem::size_of;
 use std::cmp::Ordering;
 use crate::layout::{Layout, AggrLayout, Packing};
 use std::fmt::{Debug, Formatter};
-use std::fmt;
-use llvm_ir::TypeRef;
+use std::{fmt, iter};
+use llvm_ir::{TypeRef, IntPredicate};
 use bitvec::vec::BitVec;
 use bitvec::field::BitField;
 use bitvec::order::Lsb0;
+use crate::class::Class;
+use bitvec::slice::BitSlice;
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Value {
@@ -29,7 +31,7 @@ impl Value {
         if self.layout.bits() == 0 {
             0
         } else {
-            self.vec.load_le()
+            self.vec[0..128.min(self.vec.len())].load_le()
         }
     }
     pub fn as_i128(&self) -> i128 {
@@ -70,7 +72,7 @@ impl Value {
     pub fn new(bits: u64, value: u128) -> Self {
         let mut vec = BitVec::repeat(false, bits as usize);
         if bits > 0 {
-            vec[0..bits as usize].store(value);
+            vec[0..bits.min(128) as usize].store(value);
         }
         let layout = Layout::of_int(bits);
         Self::from_bits(layout, vec)
@@ -81,6 +83,7 @@ impl Value {
     pub fn as_bytes(&self) -> &[u8] {
         self.vec.as_slice()
     }
+    pub fn as_bits(&self) -> &BitSlice<Lsb0, u8> { self.vec.as_bitslice() }
     pub fn from_bytes(bytes: &[u8], layout: Layout) -> Self {
         assert_eq!(bytes.len() as u64, layout.bytes());
         let mut bits = BitVec::from_vec(bytes.to_vec());
@@ -93,14 +96,17 @@ impl Value {
     pub fn layout(&self) -> Layout {
         self.layout
     }
-    pub fn aggregate(vs: impl Iterator<Item=Value>, packing: Packing) -> Self {
-        let values = vs.into_iter().collect::<Vec<_>>();
-        let layout = AggrLayout::new(packing, values.iter().map(|v| v.layout()));
-        let mut result = Value::zero(layout.layout());
-        for (i, v) in values.iter().enumerate() {
-            result.insert_bits(layout.bit_offset(i) as i64, v);
+    pub fn aggregate(class: &Class, vs: impl Iterator<Item=Value>) -> Self {
+        let layout = class.layout();
+        let mut result = Value::zero(layout);
+        for (i, v) in vs.enumerate() {
+            result.insert_bits(class.element(i as i64).bit_offset, &v);
         }
         result
+    }
+    pub fn extract(&self, class: &Class, index: i64) -> Value {
+        let element = class.element(index);
+        self.extract_bits(element.bit_offset, element.class.layout())
     }
     pub fn extract_bits(&self, offset: i64, layout: Layout) -> Value {
         Value::from_bits(
@@ -211,7 +217,6 @@ impl Debug for Value {
         Ok(())
     }
 }
-
 
 impl Default for Value {
     fn default() -> Self {

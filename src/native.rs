@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use crate::layout::Layout;
 use crate::value::Value;
 use crate::function::{Func};
-use crate::data::{DataFlow, Thunk};
+use crate::data::{Thunk};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use std::marker::PhantomData;
