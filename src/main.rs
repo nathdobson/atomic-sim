@@ -13,13 +13,13 @@
 use llvm_ir::Module;
 use std::{fs, panic, mem};
 use std::ffi::OsStr;
-use rayon::prelude::*;
 use std::rc::Rc;
 use std::borrow::Cow;
 use crate::compile::Compiler;
 use crate::symbols::{SymbolTable, Symbol, ModuleId};
 use crate::process::Process;
 use std::panic::AssertUnwindSafe;
+use std::thread::spawn;
 
 //mod process;
 mod layout;
@@ -47,6 +47,7 @@ mod by_address;
 mod lazy;
 mod operation;
 mod interp;
+mod future;
 
 pub fn main() {
     // use crate::thread::Thread;
@@ -64,7 +65,16 @@ pub fn main() {
             modules.push(path);
         }
     }
-    let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
+
+    let modules =
+        modules.into_iter()
+            .map(|path|
+                spawn(move ||
+                    Module::from_bc_path(path).expect("Could not parse module")))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>();
     for (mi, module) in modules.iter().enumerate() {
         println!("{:?}={:?}", ModuleId(mi), module.name);
     }

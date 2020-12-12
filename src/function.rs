@@ -8,13 +8,12 @@ use crate::process::Process;
 use std::cmp::Ordering;
 use crate::data::{Thunk, ComputeCtx};
 use std::rc::Rc;
-use futures::future::LocalBoxFuture;
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use llvm_ir::DebugLoc;
 use crate::compile::CFunc;
 use crate::interp::InterpFrame;
-use futures::FutureExt;
+use crate::future::{LocalBoxFuture, FutureExt};
 
 pub trait Func: Debug {
     fn name(&self) -> &str;

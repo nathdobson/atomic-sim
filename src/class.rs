@@ -2,7 +2,6 @@ use crate::layout::{Layout, AggrLayout, Packing};
 use std::collections::HashMap;
 use std::lazy::OnceCell;
 use std::cell::RefCell;
-use futures::StreamExt;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter};
 use std::fmt;

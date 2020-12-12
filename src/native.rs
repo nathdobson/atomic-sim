@@ -4,14 +4,13 @@ use crate::value::Value;
 use crate::function::{Func, native_comp_new, native_exec_new};
 use crate::data::{Thunk, ComputeCtx};
 use std::rc::Rc;
-use futures::future::LocalBoxFuture;
 use std::marker::PhantomData;
-use futures::FutureExt;
 use crate::backtrace::BacktraceFrame;
 use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
 use crate::layout::Packing;
 use crate::function::NativeBomb;
+use crate::future::FutureExt;
 
 macro_rules! overflow_binop {
     ($uop:expr, $sop:expr, $wrapping:ident, $checked:ident) => {

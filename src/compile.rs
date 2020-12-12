@@ -19,7 +19,6 @@ use crate::operation::CIntPredicate;
 use llvm_ir::constant::Float;
 use llvm_ir::types::FPType;
 use crate::function::Func;
-use futures::future::LocalBoxFuture;
 use crate::flow::FlowCtx;
 use crate::data::Thunk;
 use crate::backtrace::BacktraceFrame;

@@ -71,7 +71,6 @@ impl Memory {
         alloc
     }
     pub fn store(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, _atomicity: Option<Atomicity>) {
-        //println!("Storing *{:?} = {:?}", ptr, value);
         let value = value.as_bytes().to_vec();
         let len = value.len() as u64;
         let alloc = self.find_alloc_mut(ptr);

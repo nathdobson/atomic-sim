@@ -17,14 +17,12 @@ use crate::memory::{Memory};
 use std::future::Future;
 use std::task::{Context, Poll};
 use std::pin::Pin;
-use futures::{pending, FutureExt};
 use crate::data::{Thunk, DataFlow};
-use futures::future::{LocalBoxFuture, Fuse};
-use futures::task::noop_waker_ref;
 use crate::symbols::Symbol;
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use crate::process::{Process};
+use crate::future::{LocalBoxFuture, noop_waker};
 
 pub struct ThreadInner {
     threadid: ThreadId,
@@ -44,7 +42,7 @@ impl Thread {
         let main = process.lookup_symbol(&main).clone();
         let main = process.reverse_lookup_fun(&main);
         let params = params.to_vec();
-        let control: RefCell<Option<Pin<Box<dyn futures::Future<Output=()>>>>> = RefCell::new(Some(Box::pin({
+        let control: RefCell<Option<Pin<Box<dyn Future<Output=()>>>>> = RefCell::new(Some(Box::pin({
             let data = data.clone();
             async move {
                 let mut deps = vec![];
@@ -61,7 +59,7 @@ impl Thread {
         let step_control = {
             let mut control = self.0.control.borrow_mut();
             if let Some(fut) = &mut *control {
-                if fut.as_mut().poll(&mut Context::from_waker(noop_waker_ref())).is_ready() {
+                if fut.as_mut().poll(&mut Context::from_waker(&noop_waker())).is_ready() {
                     *control = None;
                 }
                 true

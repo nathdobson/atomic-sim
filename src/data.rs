@@ -1,4 +1,3 @@
-use futures::pending;
 use crate::value::Value;
 use std::fmt::{Formatter, Debug};
 use std::{fmt, mem, iter, thread};
@@ -8,7 +7,6 @@ use std::cell::{RefCell, Ref};
 use llvm_ir::instruction::Atomicity;
 use crate::layout::Layout;
 use std::future::Future;
-use futures::task::{Context, Poll};
 use std::pin::Pin;
 use std::any::type_name_of_val;
 use std::hash::{Hash, Hasher};
@@ -18,6 +16,8 @@ use crate::backtrace::Backtrace;
 use crate::process::Process;
 use crate::thread::{Thread, ThreadId};
 use std::ops::Deref;
+use std::task::{Poll, Context};
+use crate::future::pending_once;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -128,13 +128,15 @@ impl Thunk {
     }
 }
 
+
+
 impl DataFlow {
     pub fn new(process: Process, threadid: ThreadId) -> Self {
         DataFlow(Rc::new(RefCell::new(DataFlowInner { process, threadid, seq: 0, thunks: BTreeMap::new() })))
     }
     pub async fn thunk(&self, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
         while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
-            pending!();
+            pending_once().await;
         }
         let mut this = self.0.borrow_mut();
         let seq = this.seq;
