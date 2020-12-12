@@ -129,11 +129,24 @@ impl COperation {
             | UIToFP(_)
             | SIToFP(_)
             => {
-                match &self.input[0].kind() {
+                match &self.output.kind() {
                     ClassKind::IntegerClass(_)
                     | ClassKind::PointerClass(_)
                     | ClassKind::FPClass(_) => self.call_scalar(inputs),
-                    ClassKind::VectorClass(_) => todo!(),
+                    ClassKind::VectorClass(output) => {
+                        let mut vector = Value::zero(self.output.layout().bits());
+                        for i in 0..output.len as i64 {
+                            let inputs =
+                                self.input.iter()
+                                    .zip(inputs.iter())
+                                    .map(|(c, s)| { s.extract(c, i) })
+                                    .collect::<Vec<_>>();
+                            let inputs = inputs.iter().collect::<Vec<_>>();
+                            let scalar = self.call_scalar(&inputs);
+                            vector.insert(&self.output, i, &scalar)
+                        }
+                        vector
+                    }
                     _ => todo!(),
                 }
             }
@@ -214,9 +227,9 @@ impl COperation {
             | FNeg
             | ICmp(_) =>
                 self.call_scalar_binop(inputs[0], inputs[1]),
-            | SExt(_) => self.call_scalar_sext(inputs[0]),
-            | ZExt(_) => inputs[0].ucast(self.output.layout()),
-            | Trunc(_) => inputs[0].ucast(self.output.layout()),
+            | SExt(output) => self.call_scalar_sext(inputs[0],output.layout().bits()),
+            | ZExt(output) => inputs[0].ucast(output.layout()),
+            | Trunc(output) => inputs[0].ucast(output.layout()),
             | FPTrunc(_) => todo!(),
             | FPExt(_) => todo!(),
             | FPToUI(_) => todo!(),
@@ -269,8 +282,8 @@ impl COperation {
         }
     }
 
-    pub fn call_scalar_sext(&self, v1: &Value) -> Value {
-        match (v1.bits(), self.output.layout().bits()) {
+    pub fn call_scalar_sext(&self, v1: &Value,bits:u64) -> Value {
+        match (v1.bits(), bits) {
             (x, y) if x == y => v1.clone(),
             (8, 16) => Value::from(v1.unwrap_i8() as i16),
             (8, 32) => Value::from(v1.unwrap_i8() as i32),

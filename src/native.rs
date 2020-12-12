@@ -30,7 +30,7 @@ macro_rules! overflow_binop {
     };
     ($op:expr, $wrapping:ident, $checked:ident, $ty:expr, $unwrap:ident) => {
         native_comp_new(
-            &**Box::leak(Box::new(format!("llvm.{}.with.overflow.{}", $op, $ty))),
+            &format!("llvm.{}.with.overflow.{}", $op, $ty),
             move |comp, [x,y]| {
                 let (x, y) = (x.$unwrap(), y.$unwrap());
                 let types = comp.process.types();
@@ -38,6 +38,32 @@ macro_rules! overflow_binop {
                 let v2 = Value::from(x.$checked(y).is_none());
                 let class = types.struc(vec![types.int(v1.bits()), types.int(v2.bits())], false);
                 Value::aggregate(&class, [v1, v2].iter().cloned())
+            }
+        )
+    }
+}
+
+macro_rules! sat_binop {
+    ($uop:expr, $sop:expr, $method:ident) => {
+        vec![
+            sat_binop!($uop, $method, "i8", unwrap_u8),
+            sat_binop!($uop, $method, "i16", unwrap_u16),
+            sat_binop!($uop, $method, "i32", unwrap_u32),
+            sat_binop!($uop, $method, "i64", unwrap_u64),
+            sat_binop!($uop, $method, "i128", unwrap_u128),
+            sat_binop!($sop, $method, "i8", unwrap_i8),
+            sat_binop!($sop, $method, "i16", unwrap_i16),
+            sat_binop!($sop, $method, "i32", unwrap_i32),
+            sat_binop!($sop, $method, "i64", unwrap_i64),
+            sat_binop!($sop, $method, "i128", unwrap_i128)
+        ]
+    };
+    ($op:expr, $method:ident, $ty:expr, $unwrap:ident) => {
+        native_comp_new(
+            &format!("llvm.{}.{}", $op, $ty),
+            move |comp, [x,y]| {
+                let (x, y) = (x.$unwrap(), y.$unwrap());
+                Value::from(x.$method(y))
             }
         )
     }
@@ -328,7 +354,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         native_exec_new(
             "_NSGetExecutablePath",
             |flow, [buf, len_ptr]| async move {
-                let len = flow.load(&len_ptr, flow.process().layout_of_ptr()).await;
+                let len = flow.load(&len_ptr, Layout::of_int(32)).await;
                 let filename = b"unknown.rs\0";
                 if len.as_u64() < filename.len() as u64 {
                     return Value::from(0u32);
@@ -395,6 +421,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
     result.append(&mut overflow_binop!("uadd", "sadd", wrapping_add, checked_add));
     result.append(&mut overflow_binop!("umul", "smul", wrapping_mul, checked_mul));
     result.append(&mut overflow_binop!("usub", "ssub", wrapping_sub, checked_sub));
+    result.append(&mut sat_binop!("usub.sat", "ssub.sat", saturating_sub));
     result.append(&mut unop!("cttz", trailing_zeros));
     result.append(&mut unop!("ctlz", leading_zeros));
     for name in &[
@@ -441,7 +468,6 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         "kill",
         "link",
         "listen",
-        "llvm.usub.sat.i64",
         "llvm.bswap.i128",
         "llvm.bswap.i16",
         "llvm.bswap.i32",

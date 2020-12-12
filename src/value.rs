@@ -92,7 +92,7 @@ impl Value {
     }
     pub fn from_bytes(bytes: &[u8], bits: u64) -> Self {
         assert_eq!(bytes.len() as u64, (bits + 7) / 8);
-        let mut imp=Impl::with_capacity(bytes.len());
+        let mut imp = Impl::with_capacity(bytes.len());
         imp.extend_from_slice(bytes);
         Value { imp, bits }
     }
@@ -121,7 +121,7 @@ impl Value {
     }
     pub fn insert(&mut self, class: &Class, index: i64, value: &Value) {
         let element = class.element(index);
-        assert_eq!(element.class.layout().bits(), value.bits());
+        assert_eq!(element.class.layout().bits(), value.bits(), "Inserting differently sized value!");
         self.insert_bits(element.bit_offset, value);
     }
     pub fn ucast(&self, layout: Layout) -> Value {

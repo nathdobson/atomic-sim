@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use std::rc::Rc;
 use std::borrow::Cow;
 use crate::compile::Compiler;
-use crate::symbols::{SymbolTable, Symbol};
+use crate::symbols::{SymbolTable, Symbol, ModuleId};
 use crate::process::Process;
 use std::panic::AssertUnwindSafe;
 
@@ -61,13 +61,12 @@ pub fn main() {
         let path = file.expect("Could not read file").path();
         if path.extension() == Some(OsStr::new("bc"))
             && !path.file_stem().unwrap().to_str().unwrap().starts_with("panic_abort") {
-            println!("Loading {:?}", path);
             modules.push(path);
         }
     }
     let modules = modules.par_iter().map(|path| Module::from_bc_path(path).expect("Could not parse module")).collect::<Vec<_>>();
     for (mi, module) in modules.iter().enumerate() {
-        println!("{} {:?}", mi, module.name);
+        println!("{:?}={:?}", ModuleId(mi), module.name);
     }
     let (process, process_scope) = Process::new();
     process.add_native();
@@ -77,7 +76,6 @@ pub fn main() {
     process.add_thread(Symbol::External("main".to_string()));
     println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| {
         for i in 0.. {
-            println!("Stepping {}", i);
             if !process.step() {
                 break;
             }

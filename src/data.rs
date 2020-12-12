@@ -102,8 +102,6 @@ impl Thunk {
                 let v = compute(comp, args.as_slice());
                 *r = ThunkState::Ready(v);
                 mem::drop(r);
-                //println!("{:?} = {:?} ({:?})[{:?}]", self.0.seq, *r, args, self.0.deps.iter().map(|x| x.0.seq));
-                println!("{:?}", self);
             }
             ThunkState::Ready(_) => panic!("Stepping ready thunk."),
             _ => unreachable!(),

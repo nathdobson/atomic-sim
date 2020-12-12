@@ -71,7 +71,7 @@ impl Memory {
         alloc
     }
     pub fn store(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, _atomicity: Option<Atomicity>) {
-        println!("Storing *{:?} = {:?}", ptr, value);
+        //println!("Storing *{:?} = {:?}", ptr, value);
         let value = value.as_bytes().to_vec();
         let len = value.len() as u64;
         let alloc = self.find_alloc_mut(ptr);
@@ -89,7 +89,7 @@ impl Memory {
         let mut missing = (0..layout.bytes()).collect::<HashSet<_>>();
         let alloc = self.find_alloc_mut(ptr);
         assert!(alloc.ptr <= ptr.as_u64() && ptr.as_u64() + layout.bytes() <= alloc.ptr + alloc.len, "load overflow at {:?} length {:?} region {:?}", ptr, layout.bytes(), alloc);
-        println!("Loading {:?}[{:?}] from {:?}", ptr, layout, alloc);
+        //println!("Loading {:?}[{:?}] from {:?}", ptr, layout, alloc);
         for store in alloc.stores.iter().rev() {
             let ptr = ptr.as_u64();
             for i in missing.iter() {

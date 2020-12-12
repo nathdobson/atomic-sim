@@ -72,7 +72,7 @@ impl Func for NativeBomb {
     }
 
     fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
-        todo!()
+        todo!("{:?}", self.name)
     }
 
     fn debugloc(&self) -> Option<&DebugLoc> {

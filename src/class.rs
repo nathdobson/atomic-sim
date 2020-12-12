@@ -281,7 +281,7 @@ impl Class {
                 assert_eq!(vector.element.layout().bit_align() % 8, 0);
                 Element {
                     class: vector.element.clone(),
-                    bit_offset: vector.element.layout().pad_to_align().bits() as i64 * index,
+                    bit_offset: vector.element.layout().bits() as i64 * index,
                 }
             }
             ClassKind::ArrayClass(array) =>

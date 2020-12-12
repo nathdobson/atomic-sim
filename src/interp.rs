@@ -38,12 +38,10 @@ enum DecodeResult {
 
 impl InterpFrame {
     pub async fn call(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Thunk {
-        println!("{:?} {:?}", fun.args, params);
         let mut temps = VecMap::with_capacity(fun.locals.len());
         for (arg, param) in fun.args.iter().zip_eq(params.into_iter()) {
             temps.insert(arg.0, param);
         }
-        println!("{:?}", temps);
         InterpFrame {
             origin: None,
             temps,
@@ -192,7 +190,6 @@ impl InterpFrame {
     //     }
     // }
     async fn decode_instr(&mut self, ctx: &InterpCtx, instr: &CInstr) {
-        println!("{:?}", instr);
         match instr {
             CInstr::Compute(compute) => {
                 let deps = self.decode_operands(ctx, compute.operands.iter()).await;
@@ -291,7 +288,6 @@ impl InterpFrame {
         }
     }
     async fn decode_term(&mut self, ctx: &InterpCtx, term: &CTerm) -> DecodeResult {
-        println!("{:?}", term);
         match term {
             CTerm::Ret(ret) => {
                 DecodeResult::Return(self.decode_operand(ctx, &ret.return_operand).await)
