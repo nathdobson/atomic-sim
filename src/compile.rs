@@ -123,6 +123,7 @@ pub enum CInstr {
     CmpXchg(Rc<CCmpXchg>),
     AtomicRMW(Rc<CAtomicRMW>),
     Freeze,
+    Fence,
 
     Unknown(Instruction),
 }
@@ -530,6 +531,9 @@ impl FuncCompiler {
                     func,
                     arguments,
                 }))
+            }
+            Instruction::Fence(Fence { atomicity, debugloc }) => {
+                CInstr::Fence
             }
             instr => CInstr::Unknown(instr.clone())
         }

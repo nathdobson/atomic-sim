@@ -230,6 +230,7 @@ impl COperation {
     fn call_scalar_binop(&self, v1: &Value, v2: &Value) -> Value {
         use COperationName::*;
         match &self.name {
+            Xchg => v2.clone(),
             Add => call_scalar_binop_unsigned(v1, v2, |_, _| todo!(), repeat5!(|x,y| x.wrapping_add(y))),
             Sub => call_scalar_binop_unsigned(v1, v2, |_, _| todo!(), repeat5!(|x,y| x.wrapping_sub(y))),
             Mul => call_scalar_binop_unsigned(v1, v2, |_, _| todo!(), repeat5!(|x,y| x.wrapping_mul(y))),
@@ -263,6 +264,7 @@ impl COperation {
                     CIntPredicate::SLE => call_scalar_binop_signed(v1, v2, repeat5!(|x,y| x<=y)),
                 }
             }
+
             _ => unreachable!("{:?}", self)
         }
     }

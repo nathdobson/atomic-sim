@@ -284,6 +284,9 @@ impl InterpFrame {
                 self.assign(atomicrmw.dest, result);
             }
             CInstr::Freeze => todo!(),
+            CInstr::Fence => {
+                //TODO
+            }
             CInstr::Unknown(instr) => todo!("{:?}", instr),
         }
     }
