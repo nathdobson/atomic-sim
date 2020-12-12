@@ -14,7 +14,6 @@ use std::any::type_name_of_val;
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use defer::defer;
-use crate::compute::ComputeCtx;
 use crate::backtrace::Backtrace;
 use crate::process::Process;
 use crate::thread::{Thread, ThreadId};
@@ -48,6 +47,11 @@ pub enum StoreOrdering {
     NotAtomic,
 }
 
+pub struct ComputeCtx {
+    pub process: Process,
+    pub threadid: ThreadId,
+}
+
 pub enum ThunkState {
     Pending(Box<dyn FnOnce(&ComputeCtx, &[&Value]) -> Value>),
     Load { layout: Layout },
@@ -63,7 +67,6 @@ pub struct ThunkInner {
     seq: usize,
     deps: Vec<Thunk>,
     address: Option<Thunk>,
-    name: String,
     backtrace: Backtrace,
     value: RefCell<ThunkState>,
 }
@@ -131,7 +134,7 @@ impl DataFlow {
     pub fn new(process: Process, threadid: ThreadId) -> Self {
         DataFlow(Rc::new(RefCell::new(DataFlowInner { process, threadid, seq: 0, thunks: BTreeMap::new() })))
     }
-    pub async fn thunk(&self, name: String, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
+    pub async fn thunk(&self, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
         while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
             pending!();
         }
@@ -144,7 +147,6 @@ impl DataFlow {
             seq,
             deps,
             address: None,
-            name,
             backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
@@ -152,19 +154,21 @@ impl DataFlow {
         thunk
     }
     pub async fn constant(&self, backtrace: Backtrace, v: Value) -> Thunk {
-        self.thunk("constant".to_string(), backtrace, vec![], |_, _| v).await
+        self.thunk(backtrace, vec![], |_, _| v).await
     }
     pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
+        let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk("store".to_string(), backtrace, vec![address, value], move |comp, args| {
-            comp.process.store(threadid, args[0], args[1], atomicity);
+        self.thunk(backtrace, vec![address, value], move |comp, args| {
+            process.store(threadid, args[0], args[1], atomicity);
             Value::from(())
         }).await
     }
     pub async fn load<'a>(&'a self, backtrace: Backtrace, address: Thunk, layout: Layout, atomicity: Option<Atomicity>) -> Thunk {
+        let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk("load".to_string(), backtrace, vec![address], move |comp, args| {
-            comp.process.load(threadid, args[0], layout, atomicity)
+        self.thunk(backtrace, vec![address], move |comp, args| {
+            process.load(threadid, args[0], layout, atomicity)
         }).await
     }
     pub fn len(&self) -> usize {
@@ -174,13 +178,14 @@ impl DataFlow {
         self.0.borrow().seq
     }
     pub fn step(&self) -> bool {
+        let threadid = self.0.borrow().threadid;
         let thunk = self.0.borrow_mut().thunks.pop_first();
         if let Some((_, thunk)) = thunk {
             let thunk2 = thunk.clone();
             let _d = defer(move || if thread::panicking() {
                 println!("Panic while forcing {:#?}", thunk2.full_debug());
             });
-            thunk.step(&ComputeCtx { process: self.0.borrow().process.clone() });
+            thunk.step(&ComputeCtx { process: self.0.borrow().process.clone(), threadid });
             true
         } else {
             false
@@ -216,7 +221,13 @@ impl<'a> Debug for DebugDeps<'a> {
 
 impl Debug for Thunk {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}_{} = {} {:?} [{:?}]", self.0.threadid, self.0.seq, self.0.name, self.0.value.borrow(), self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>())
+        write!(f, "{:?}_{} = {:?} [{:?}] {:?}",
+               self.0.threadid,
+               self.0.seq,
+               self.0.value.borrow(),
+               self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>(),
+               self.0.backtrace.iter().next(),
+        )
     }
 }
 

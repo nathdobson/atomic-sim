@@ -1,4 +1,4 @@
-use std::ops::{Add, Index, IndexMut, BitXor, Rem, Mul, Sub, BitAnd, Div, Shr, Shl, BitOr};
+use std::ops::{Add, Index, IndexMut, BitXor, Rem, Mul, Sub, BitAnd, Div, Shr, Shl, BitOr, Range, RangeFull, RangeTo, RangeFrom};
 use std::mem::size_of;
 use std::cmp::Ordering;
 use crate::layout::{Layout, AggrLayout, Packing};
@@ -10,10 +10,17 @@ use bitvec::field::BitField;
 use bitvec::order::Lsb0;
 use crate::class::Class;
 use bitvec::slice::BitSlice;
+use smallvec::SmallVec;
+
+//TODO
+type Impl = Vec<u8>;
+
+pub type ValueSlice = BitSlice<Lsb0, u8>;
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Value {
-    vec: BitVec<Lsb0, u8>,
+    imp: Impl,
+    bits: u64,
 }
 
 pub fn add_u64_i64(x: u64, y: i64) -> u64 {
@@ -26,10 +33,10 @@ pub fn add_u64_i64(x: u64, y: i64) -> u64 {
 
 impl Value {
     pub fn as_u128(&self) -> u128 {
-        if self.vec.is_empty() {
+        if self.imp.is_empty() {
             0
         } else {
-            self.vec[0..128.min(self.vec.len())].load_le()
+            self[0..128.min(self.bits)].load_le()
         }
     }
     pub fn as_i128(&self) -> i128 {
@@ -45,7 +52,7 @@ impl Value {
     pub fn as_u64(&self) -> u64 { self.as_u128() as u64 }
     pub fn as_i64(&self) -> i64 { self.as_i128() as i64 }
     pub fn bits(&self) -> u64 {
-        self.vec.len() as u64
+        self.bits
     }
     pub fn unwrap_int(&self, expected_bits: u64) -> u128 {
         assert_eq!(self.bits(), expected_bits);
@@ -63,28 +70,31 @@ impl Value {
     pub fn unwrap_u128(&self) -> u128 { self.unwrap_int(128) as u128 }
     pub fn unwrap_i128(&self) -> i128 { self.unwrap_int(128) as i128 }
 
-    pub fn from_bits(vec: BitVec<Lsb0, u8>) -> Self {
-        Self { vec }
+    pub fn from_bits(slice: &ValueSlice) -> Self {
+        let mut result = Self::zero(slice.len() as u64);
+        result[..].copy_from_bitslice(slice);
+        result
     }
     pub fn new(bits: u64, value: u128) -> Self {
-        let mut vec = BitVec::repeat(false, bits as usize);
+        let mut result = Value::zero(bits);
         if bits > 0 {
-            vec[0..bits.min(128) as usize].store(value);
+            result[0..bits.min(128)].store(value);
         }
-        Self::from_bits(vec)
+        result
     }
     pub fn zero(bits: u64) -> Self {
-        Self::from_bits(BitVec::repeat(false, bits as usize))
+        let mut imp = Impl::new();
+        imp.resize(((bits + 7) / 8) as usize, 0);
+        Value { imp, bits }
     }
     pub fn as_bytes(&self) -> &[u8] {
-        self.vec.as_slice()
+        self.imp.as_slice()
     }
-    pub fn as_bits(&self) -> &BitSlice<Lsb0, u8> { self.vec.as_bitslice() }
     pub fn from_bytes(bytes: &[u8], bits: u64) -> Self {
         assert_eq!(bytes.len() as u64, (bits + 7) / 8);
-        let mut bit_vec = BitVec::from_vec(bytes.to_vec());
-        bit_vec.truncate(bits as usize);
-        Self::from_bits(bit_vec)
+        let mut imp=Impl::with_capacity(bytes.len());
+        imp.extend_from_slice(bytes);
+        Value { imp, bits }
     }
     pub fn from_bytes_exact(bytes: &[u8]) -> Self {
         Self::from_bytes(bytes, (bytes.len() * 8) as u64)
@@ -102,18 +112,23 @@ impl Value {
         self.extract_bits(element.bit_offset, element.class.layout().bits())
     }
     pub fn extract_bits(&self, offset: i64, len: u64) -> Value {
-        Value::from_bits(
-            BitVec::from_bitslice(
-                &self.vec[offset as usize..offset as usize + len as usize]),
-        )
+        Value::from_bits(&self[offset as u64..offset as u64 + len as u64])
     }
     pub fn insert_bits(&mut self, offset: i64, value: &Value) {
-        self.vec[offset as usize..offset as usize + value.bits() as usize].copy_from_bitslice(&value.vec);
+        let left = &mut self[offset as u64..offset as u64 + value.bits()];
+        let right = &value[..];
+        left.copy_from_bitslice(right);
+    }
+    pub fn insert(&mut self, class: &Class, index: i64, value: &Value) {
+        let element = class.element(index);
+        assert_eq!(element.class.layout().bits(), value.bits());
+        self.insert_bits(element.bit_offset, value);
     }
     pub fn ucast(&self, layout: Layout) -> Value {
-        let mut vec = self.vec.clone();
-        vec.resize(layout.bits() as usize, false);
-        Value::from_bits(vec)
+        let mut result = Self::zero(layout.bits());
+        let len = self.bits.min(layout.bits());
+        result[..len].copy_from_bitslice(&self[..len]);
+        result
     }
 }
 
@@ -203,7 +218,7 @@ impl Debug for Value {
             write!(f, "{}", self.unwrap_bool())?;
         } else {
             assert_eq!(self.bits() % 8, 0);
-            for x in self.vec.as_slice() {
+            for x in self.imp.as_slice() {
                 write!(f, "{:02X}", x)?;
             }
         }
@@ -214,5 +229,65 @@ impl Debug for Value {
 impl Default for Value {
     fn default() -> Self {
         Value::from(())
+    }
+}
+
+impl Index<RangeFull> for Value {
+    type Output = ValueSlice;
+
+    fn index(&self, index: RangeFull) -> &Self::Output {
+        &BitSlice::from_slice(self.imp.as_slice()).unwrap()[..self.bits as usize]
+    }
+}
+
+impl Index<u64> for Value {
+    type Output = bool;
+    fn index(&self, index: u64) -> &Self::Output {
+        &self[..][index as usize]
+    }
+}
+
+impl Index<Range<u64>> for Value {
+    type Output = ValueSlice;
+    fn index(&self, index: Range<u64>) -> &Self::Output {
+        &self[..][index.start as usize..index.end as usize]
+    }
+}
+
+impl Index<RangeTo<u64>> for Value {
+    type Output = ValueSlice;
+    fn index(&self, index: RangeTo<u64>) -> &Self::Output {
+        &self[..][..index.end as usize]
+    }
+}
+
+impl Index<RangeFrom<u64>> for Value {
+    type Output = ValueSlice;
+    fn index(&self, index: RangeFrom<u64>) -> &Self::Output {
+        &self[..][index.start as usize..]
+    }
+}
+
+impl IndexMut<RangeFull> for Value {
+    fn index_mut(&mut self, index: RangeFull) -> &mut Self::Output {
+        &mut BitSlice::from_slice_mut(self.imp.as_mut()).unwrap()[..self.bits as usize]
+    }
+}
+
+impl IndexMut<Range<u64>> for Value {
+    fn index_mut(&mut self, index: Range<u64>) -> &mut Self::Output {
+        &mut self[..][index.start as usize..index.end as usize]
+    }
+}
+
+impl IndexMut<RangeTo<u64>> for Value {
+    fn index_mut(&mut self, index: RangeTo<u64>) -> &mut Self::Output {
+        &mut self[..][..index.end as usize]
+    }
+}
+
+impl IndexMut<RangeFrom<u64>> for Value {
+    fn index_mut(&mut self, index: RangeFrom<u64>) -> &mut Self::Output {
+        &mut self[..][index.start as usize..]
     }
 }

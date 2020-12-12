@@ -17,8 +17,9 @@ use rayon::prelude::*;
 use std::rc::Rc;
 use std::borrow::Cow;
 use crate::compile::Compiler;
-use crate::symbols::SymbolTable;
+use crate::symbols::{SymbolTable, Symbol};
 use crate::process::Process;
+use std::panic::AssertUnwindSafe;
 
 //mod process;
 mod layout;
@@ -28,7 +29,7 @@ mod value;
 // mod function;
 // mod data;
 mod symbols;
-// mod native;
+mod native;
 // mod interp;
 mod backtrace;
 // mod flow;
@@ -39,14 +40,13 @@ mod compile;
 mod memory;
 mod process;
 mod data;
-mod compute;
 mod thread;
 mod flow;
 mod function;
 mod by_address;
 mod lazy;
-mod arith;
 mod operation;
+mod interp;
 
 pub fn main() {
     // use crate::thread::Thread;
@@ -70,10 +70,20 @@ pub fn main() {
         println!("{} {:?}", mi, module.name);
     }
     let (process, process_scope) = Process::new();
-    let mut compiler = Compiler::new(64, process.clone());
+    process.add_native();
+    let mut compiler = Compiler::new(process.clone());
     compiler.compile_modules(modules);
-    mem::drop(process_scope);
 
+    process.add_thread(Symbol::External("main".to_string()));
+    println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| {
+        for i in 0.. {
+            println!("Stepping {}", i);
+            if !process.step() {
+                break;
+            }
+        }
+    })));
+    mem::drop(process_scope);
     // let modules = &modules;
     // let native = native::builtins();
     // let ctx = Rc::new(Ctx::new(modules, native));

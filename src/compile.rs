@@ -1,4 +1,4 @@
-use llvm_ir::{Function, Module, Name, Instruction, Terminator, Operand, BasicBlock, ConstantRef, Constant, IntPredicate};
+use llvm_ir::{Function, Module, Name, Instruction, Terminator, Operand, BasicBlock, ConstantRef, Constant, IntPredicate, DebugLoc, HasDebugLoc};
 use std::rc::Rc;
 use llvm_ir::instruction::*;
 use crate::symbols::{Symbol, SymbolTable, ModuleId};
@@ -13,114 +13,150 @@ use crate::thread::ThreadId;
 use llvm_ir::constant;
 use llvm_ir::terminator::*;
 use either::Either;
-use crate::arith;
 use itertools::Itertools;
 use crate::operation::{COperationName, COperation, CFPPredicate};
 use crate::operation::CIntPredicate;
 use llvm_ir::constant::Float;
 use llvm_ir::types::FPType;
+use crate::function::Func;
+use futures::future::LocalBoxFuture;
+use crate::flow::FlowCtx;
+use crate::data::Thunk;
+use crate::backtrace::BacktraceFrame;
 
 #[derive(Debug)]
 pub struct CFunc {
+    pub fp: u64,
     pub src: Function,
+    pub args: Vec<CLocal>,
     pub blocks: Vec<CBlock>,
     pub locals: Vec<Name>,
 }
 
 #[derive(Debug)]
+pub struct CBlockInstr {
+    pub instr: CInstr,
+    pub frame: BacktraceFrame,
+}
+
+#[derive(Debug)]
+pub struct CBlockTerm {
+    pub term: CTerm,
+    pub frame: BacktraceFrame,
+}
+
+#[derive(Debug)]
 pub struct CBlock {
-    phis: Vec<CPhi>,
-    instrs: Vec<CInstr>,
-    term: CTerm,
+    pub id: CBlockId,
+    pub phis: Vec<CPhi>,
+    pub instrs: Vec<CBlockInstr>,
+    pub term: CBlockTerm,
 }
 
 #[derive(Debug)]
 pub struct CLoad {
-    dest: CLocal,
-    address: COperand,
+    pub dest: CLocal,
+    pub address: COperand,
+    pub atomicity: Option<Atomicity>,
 }
 
 #[derive(Debug)]
 pub struct CStore {
-    address: COperand,
-    value: COperand,
+    pub address: COperand,
+    pub value: COperand,
+    pub atomicity: Option<Atomicity>,
 }
 
 
 #[derive(Debug)]
 pub struct CCompute {
-    dest: CLocal,
-    operands: Vec<COperand>,
-    operation: COperation,
-}
-
-#[derive(Debug)]
-pub struct CSelect {
-    dest: CLocal,
-    condition: COperand,
-    true_value: COperand,
-    false_value: COperand,
+    pub dest: CLocal,
+    pub operands: Vec<COperand>,
+    pub operation: COperation,
 }
 
 #[derive(Debug)]
 pub struct CAlloca {
-    dest: CLocal,
-    count: COperand,
-    layout: Layout,
+    pub dest: CLocal,
+    pub count: COperand,
+    pub layout: Layout,
 }
 
 #[derive(Debug)]
-pub struct CCall {}
+pub struct CCall {
+    pub dest: Option<CLocal>,
+    pub func: COperand,
+    pub arguments: Vec<COperand>,
+}
+
+#[derive(Debug)]
+pub struct CAtomicRMW {
+    pub dest: CLocal,
+    pub address: COperand,
+    pub value: COperand,
+    pub operation: COperation,
+    pub atomicity: Atomicity,
+}
+
+#[derive(Debug)]
+pub struct CCmpXchg {
+    pub dest: CLocal,
+    pub address: COperand,
+    pub expected: COperand,
+    pub replacement: COperand,
+    pub success: MemoryOrdering,
+    pub failure: MemoryOrdering,
+    pub weak: bool,
+}
+
 
 #[derive(Debug)]
 pub enum CInstr {
-    Compute(CCompute),
+    Compute(Rc<CCompute>),
 
-    Select(CSelect),
-    Call(CCall),
-    Alloca(CAlloca),
+    Call(Rc<CCall>),
+    Alloca(Rc<CAlloca>),
 
-    Load(CLoad),
-    Store(CStore),
+    Load(Rc<CLoad>),
+    Store(Rc<CStore>),
 
-    Fence,
-    CmpXchg,
-    AtomicRMW,
+    CmpXchg(Rc<CCmpXchg>),
+    AtomicRMW(Rc<CAtomicRMW>),
     Freeze,
 
-    LandingPad,
+    Unknown(Instruction),
 }
 
 #[derive(Debug)]
 pub struct CRet {
-    return_operand: COperand,
+    pub return_operand: COperand,
 }
 
 #[derive(Debug)]
 pub struct CBr {
-    target: CBlockId,
+    pub target: CBlockId,
 }
 
 #[derive(Debug)]
 pub struct CCondBr {
-    condition: COperand,
-    true_target: CBlockId,
-    false_target: CBlockId,
+    pub condition: COperand,
+    pub true_target: CBlockId,
+    pub false_target: CBlockId,
 }
 
 #[derive(Debug)]
 pub struct CSwitch {
-    condition: COperand,
-    targets: HashMap<Value, CBlockId>,
-    default_target: CBlockId,
+    pub condition: COperand,
+    pub targets: HashMap<Value, CBlockId>,
+    pub default_target: CBlockId,
 }
 
 #[derive(Debug)]
 pub struct CInvoke {
-    function: COperand,
-    arguments: Vec<COperand>,
-    dest: CLocal,
-    target: CBlockId,
+    pub function: COperand,
+    pub arguments: Vec<COperand>,
+    pub dest: CLocal,
+    pub target: CBlockId,
 }
 
 #[derive(Debug)]
@@ -141,6 +177,7 @@ pub enum CTerm {
 pub enum COperand {
     Constant(Class, Value),
     Local(Class, CLocal),
+    Inline,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -151,8 +188,8 @@ pub struct CLocal(pub usize);
 
 #[derive(Debug)]
 pub struct CPhi {
-    dest: CLocal,
-    mapping: HashMap<CBlockId, COperand>,
+    pub dest: CLocal,
+    pub mapping: HashMap<CBlockId, COperand>,
 }
 
 
@@ -253,11 +290,11 @@ impl FuncCompiler {
                 .map(|oper| oper.class())
                 .collect::<Vec<_>>();
         let operation = self.module_compiler.compile_operation(&operand_classes, name);
-        CInstr::Compute(CCompute {
+        CInstr::Compute(Rc::new(CCompute {
             dest: self.compile_local(dest),
             operands,
             operation,
-        })
+        }))
     }
     fn compile_instr(&mut self, instr: &Instruction) -> CInstr {
         match instr {
@@ -284,7 +321,7 @@ impl FuncCompiler {
                 let operand1 = self.compile_operand(operand1);
                 let class = operand0.class().clone();
                 assert_eq!(&class, operand1.class(), "{}", instr);
-                CInstr::Compute(CCompute {
+                CInstr::Compute(Rc::new(CCompute {
                     dest: self.compile_local(dest),
                     operands: vec![operand0, operand1],
                     operation: COperation {
@@ -292,7 +329,7 @@ impl FuncCompiler {
                         output: class,
                         name: self.compile_binop(instr),
                     },
-                })
+                }))
             }
             Instruction::FNeg(FNeg { operand, dest, debugloc })
             => {
@@ -340,11 +377,12 @@ impl FuncCompiler {
                             output = output.element(c.as_i64()).class,
                         COperand::Local(_, _) =>
                             output = output.element(-1).class,
+                        COperand::Inline => todo!(),
                     }
                     input.push(operand.class().clone());
                     operands.push(operand);
                 }
-                CInstr::Compute(CCompute {
+                CInstr::Compute(Rc::new(CCompute {
                     dest: self.compile_local(dest),
                     operands,
                     operation: COperation {
@@ -352,7 +390,7 @@ impl FuncCompiler {
                         output: self.type_map.ptr(output),
                         name: COperationName::GetElementPtr,
                     },
-                })
+                }))
             }
             Instruction::ExtractElement(ExtractElement { vector, index, dest, debugloc }) => {
                 self.compile_compute(dest, &[vector, index], COperationName::ExtractElement)
@@ -374,68 +412,132 @@ impl FuncCompiler {
                                      COperationName::ExtractValue(indices.iter().map(|x| *x as i64).collect()))
             }
             Instruction::InsertValue(InsertValue { aggregate, element, indices, dest, debugloc }) => {
-                self.compile_compute(dest, &[aggregate, element], COperationName::InsertValue)
+                self.compile_compute(dest,
+                                     &[aggregate, element],
+                                     COperationName::InsertValue(
+                                         indices.iter().map(|x| *x as i64).collect()))
             }
             Instruction::Select(Select { condition, true_value, false_value, dest, debugloc }) => {
-                CInstr::Select(CSelect {
-                    dest: self.compile_local(dest),
-                    condition: self.compile_operand(condition),
-                    true_value: self.compile_operand(true_value),
-                    false_value: self.compile_operand(false_value),
-                })
+                self.compile_compute(dest, &[condition, true_value, false_value], COperationName::Select)
+                // CInstr::Select(CSelect {
+                //     dest: self.compile_local(dest),
+                //     condition: self.compile_operand(condition),
+                //     true_value: self.compile_operand(true_value),
+                //     false_value: self.compile_operand(false_value),
+                // })
             }
             Instruction::Phi(Phi { incoming_values, dest, to_type, debugloc }) => {
                 unreachable!()
             }
             Instruction::Alloca(Alloca { allocated_type, num_elements, dest, alignment, debugloc }) => {
-                CInstr::Alloca(CAlloca {
+                CInstr::Alloca(Rc::new(CAlloca {
                     dest: self.compile_local(dest),
                     count: self.compile_operand(num_elements),
                     layout: self.type_map.get(allocated_type).layout().align_to_bits((8 * *alignment) as u64),
-                })
+                }))
             }
             Instruction::Load(Load { address, dest, volatile, atomicity, alignment, debugloc }) => {
-                CInstr::Load(CLoad {
+                CInstr::Load(Rc::new(CLoad {
                     dest: self.compile_local(dest),
                     address: self.compile_operand(address),
-                })
+                    atomicity: atomicity.clone(),
+                }))
             }
             Instruction::Store(Store { address, value, volatile, atomicity, alignment, debugloc }) => {
-                CInstr::Store(CStore {
+                CInstr::Store(Rc::new(CStore {
                     address: self.compile_operand(address),
                     value: self.compile_operand(value),
-                })
+                    atomicity: atomicity.clone(),
+                }))
             }
-            Instruction::Fence(Fence { atomicity, debugloc }) => {
-                CInstr::Fence
+            Instruction::CmpXchg(CmpXchg {
+                                     address,
+                                     expected,
+                                     replacement,
+                                     dest,
+                                     volatile,
+                                     atomicity,
+                                     failure_memory_ordering,
+                                     debugloc,
+                                     weak
+                                 }) => {
+                let address = self.compile_operand(address);
+                let expected = self.compile_operand(expected);
+                let replacement = self.compile_operand(replacement);
+                CInstr::CmpXchg(Rc::new(CCmpXchg {
+                    dest: self.compile_local(dest),
+                    address,
+                    expected,
+                    replacement,
+                    success: atomicity.mem_ordering,
+                    failure: *failure_memory_ordering,
+                    weak: *weak,
+                }))
             }
-            Instruction::CmpXchg(CmpXchg { address, expected, replacement, dest, volatile, atomicity, failure_memory_ordering, debugloc, weak }) => {
-                CInstr::CmpXchg
-            }
-            Instruction::AtomicRMW(AtomicRMW { address, value, dest, operation, volatile, atomicity, debugloc }) => {
-                CInstr::AtomicRMW
+            Instruction::AtomicRMW(AtomicRMW {
+                                       address,
+                                       value,
+                                       dest,
+                                       operation,
+                                       volatile,
+                                       atomicity,
+                                       debugloc
+                                   }) => {
+                let address = self.compile_operand(address);
+                let value = self.compile_operand(value);
+                let class = value.class().clone();
+                let operation = match operation {
+                    RMWBinOp::Xchg => COperationName::Xchg,
+                    RMWBinOp::Add => COperationName::Add,
+                    RMWBinOp::Sub => COperationName::Sub,
+                    RMWBinOp::And => COperationName::And,
+                    RMWBinOp::Or => COperationName::Or,
+                    RMWBinOp::Xor => COperationName::Xor,
+                    RMWBinOp::FAdd => COperationName::FAdd,
+                    RMWBinOp::FSub => COperationName::FSub,
+                    _ => todo!("{:?}", operation),
+                };
+                let operation = self.module_compiler.compile_operation(&[&class, &class], operation);
+                CInstr::AtomicRMW(Rc::new(CAtomicRMW {
+                    dest: self.compile_local(dest),
+                    address,
+                    value,
+                    operation,
+                    atomicity: atomicity.clone(),
+                }))
             }
             Instruction::Freeze(Freeze { operand, dest, debugloc }) => {
                 CInstr::Freeze
             }
             Instruction::Call(Call {
                                   function,
-                                  arguments, return_attributes, dest, function_attributes, is_tail_call, calling_convention, debugloc
+                                  arguments,
+                                  return_attributes,
+                                  dest,
+                                  function_attributes,
+                                  is_tail_call,
+                                  calling_convention,
+                                  debugloc
                               }) => {
-                CInstr::Call(CCall {})
+                let dest = dest.as_ref().map(|dest| self.compile_local(dest));
+                let func = self.compile_func_operand(function);
+                let arguments =
+                    arguments.iter()
+                        .map(|(arg, _)| self.compile_operand(arg))
+                        .collect::<Vec<_>>();
+                CInstr::Call(Rc::new(CCall {
+                    dest,
+                    func,
+                    arguments,
+                }))
             }
-            Instruction::VAArg(_) => {
-                todo!()
-            }
-            Instruction::LandingPad(_) => {
-                CInstr::LandingPad
-            }
-            Instruction::CatchPad(_) => {
-                todo!()
-            }
-            Instruction::CleanupPad(_) => {
-                todo!()
-            }
+            instr => CInstr::Unknown(instr.clone())
+        }
+    }
+    fn compile_func_operand(&mut self, oper: &Either<InlineAssembly, Operand>) -> COperand {
+        match oper {
+            Either::Left(_) => COperand::Inline,
+            Either::Right(oper) => self.compile_operand(oper),
         }
     }
     fn compile_target(&mut self, name: &Name) -> CBlockId {
@@ -501,10 +603,8 @@ impl FuncCompiler {
                                    debugloc
                                }) => {
                 CTerm::Invoke(CInvoke {
-                    function: match function {
-                        Either::Left(_) => todo!(),
-                        Either::Right(function) => self.compile_operand(function),
-                    },
+                    function: self.compile_operand(
+                        function.as_ref().expect_right("Inline assembly!")),
                     arguments: arguments.iter().map(|(arg, _)|
                         self.compile_operand(arg)
                     ).collect(),
@@ -555,28 +655,36 @@ impl FuncCompiler {
             }
         }
     }
-    fn compile_block(&mut self, block: &BasicBlock) -> CBlock {
+    fn compile_block(&mut self, loc: &Value, id: CBlockId, block: &BasicBlock) -> CBlock {
         let mut phis = vec![];
         let mut instrs = vec![];
         for instr in block.instrs.iter() {
             match instr {
                 Instruction::Phi(phi) => phis.push(self.compile_phi(&phi)),
-                instr => instrs.push(self.compile_instr(&instr)),
+                instr => instrs.push(CBlockInstr {
+                    instr: self.compile_instr(&instr),
+                    frame: BacktraceFrame::new(loc.as_u64(), format!("{}", instr)),
+                }),
             }
         }
-        let term = self.compile_term(&block.term);
-        CBlock { phis, instrs, term }
+        let term = CBlockTerm {
+            term: self.compile_term(&block.term),
+            frame: BacktraceFrame::new(loc.as_u64(), format!("{}", block.term)),
+        };
+        CBlock { id, phis, instrs, term }
     }
-    fn compile_func(&mut self, func: &Function) -> CFunc {
+    fn compile_func(&mut self, loc: &Value, func: &Function) -> CFunc {
         let mut blocks = Vec::with_capacity(func.basic_blocks.len());
         for (i, block) in func.basic_blocks.iter().enumerate() {
             self.block_ids.insert(block.name.clone(), CBlockId(i));
         }
-        for block in func.basic_blocks.iter() {
-            blocks.push(self.compile_block(block));
+        for (i, block) in func.basic_blocks.iter().enumerate() {
+            blocks.push(self.compile_block(loc, CBlockId(i), block));
         }
         CFunc {
+            fp: loc.as_u64(),
             src: func.clone(),
+            args: func.parameters.iter().map(|p| self.compile_local(&p.name)).collect(),
             blocks,
             locals: self.local_names.clone(),
         }
@@ -591,7 +699,6 @@ struct ModuleCompiler {
 }
 
 pub struct Compiler {
-    ptr_bits: u64,
     process: Process,
 }
 
@@ -599,7 +706,8 @@ impl ModuleCompiler {
     fn compile_operation(&self, operands: &[&Class], name: COperationName) -> COperation {
         use COperationName::*;
         let output = match &name {
-            Add
+            Xchg
+            | Add
             | Sub
             | Mul
             | UDiv
@@ -651,10 +759,14 @@ impl ModuleCompiler {
             }
             ExtractValue(indices) => operands[0].element_rec(&mut indices.iter().cloned()).class.clone(),
             InsertElement => operands[0].clone(),
-            InsertValue => operands[0].clone(),
+            InsertValue(_) => operands[0].clone(),
             Shuffle(indices) => {
                 let l = operands[0].as_vector().unwrap();
                 self.type_map.vector(l.element.clone(), indices.len() as u64)
+            }
+            Select => {
+                assert_eq!(operands[1], operands[2]);
+                operands[1].clone()
             }
         };
         COperation {
@@ -868,15 +980,13 @@ impl ModuleCompiler {
 }
 
 impl Compiler {
-    pub fn new(ptr_bits: u64, process: Process) -> Self {
+    pub fn new(process: Process) -> Self {
         Compiler {
-            ptr_bits,
             process,
         }
     }
-    pub fn compile_modules(&mut self, modules: Vec<Module>) -> HashMap<u64, CFunc> {
-        let mut funcs = HashMap::new();
-        let type_map = TypeMap::new(self.ptr_bits);
+    pub fn compile_modules(&mut self, modules: Vec<Module>) {
+        let type_map = self.process.types();
         for module in modules.iter() {
             type_map.add_module(module);
         }
@@ -917,13 +1027,13 @@ impl Compiler {
             }
         }
         for (module, loc, func) in func_inits {
-            funcs.insert(loc.as_u64(), FuncCompiler {
+            self.process.add_func(&loc, Rc::new(FuncCompiler {
                 locals: HashMap::new(),
                 local_names: vec![],
                 block_ids: HashMap::new(),
                 type_map: module.type_map.clone(),
                 module_compiler: module.clone(),
-            }.compile_func(func));
+            }.compile_func(&loc, func)));
         }
         for (module, loc, layout, global) in global_inits {
             let value = if let Some(init) = &global.initializer {
@@ -936,15 +1046,15 @@ impl Compiler {
             };
             self.process.store(ThreadId(0), &loc, &value, None);
         }
-        funcs
     }
 }
 
 impl COperand {
-    fn class(&self) -> &Class {
+    pub fn class(&self) -> &Class {
         match self {
             COperand::Constant(c, _) => c,
             COperand::Local(c, _) => c,
+            COperand::Inline => todo!(),
         }
     }
 }
@@ -955,3 +1065,4 @@ fn str_of_name(name: &Name) -> &str {
         Name::Number(_) => panic!(),
     }
 }
+

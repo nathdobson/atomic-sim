@@ -127,7 +127,7 @@ impl TypeMap {
     }
     fn get_inner(&self, typ: TypeRef) -> ClassInner {
         let (kind, layout) = match &*typ {
-            Type::VoidType =>
+            Type::VoidType | Type::MetadataType =>
                 (ClassKind::VoidClass(VoidClass),
                  Layout::from_bytes(0, 1)),
             Type::IntegerType { bits } =>
@@ -183,7 +183,7 @@ impl TypeMap {
                 (ClassKind::StructClass(StructClass { fields, layout }),
                  layout)
             }
-            _ => todo!(),
+            _ => todo!("{:?}", typ),
         };
         let id = self.0.borrow_mut().next_id;
         self.0.borrow_mut().next_id += 1;
@@ -311,6 +311,9 @@ impl Class {
             ClassKind::VectorClass(v) => Some(v),
             _ => None
         }
+    }
+    pub fn target(&self) -> Class {
+        self.element(-1).class
     }
 }
 

@@ -108,7 +108,7 @@ impl Memory {
                 break;
             }
         }
-        Value::from_bytes_exact(&bytes)
+        Value::from_bytes(&bytes, layout.bits())
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
         format!("{:?}", self.find_alloc(ptr))

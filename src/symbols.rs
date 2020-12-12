@@ -26,14 +26,14 @@ pub enum Symbol {
 
 impl SymbolTable {
     pub fn new() -> Self {
-        SymbolTable{
+        SymbolTable {
             forward: HashMap::new(),
             reverse: HashMap::new(),
         }
     }
     pub fn add_symbol(&mut self, memory: &mut Memory, name: Symbol, layout: Layout) -> Value {
         let address = memory.alloc(layout);
-        assert!(self.forward.insert(name.clone(), address.clone()).is_none());
+        assert!(self.forward.insert(name.clone(), address.clone()).is_none(), "{:?}", name);
         assert!(self.reverse.insert(address.clone(), name).is_none());
         address
     }
@@ -58,7 +58,8 @@ impl SymbolTable {
         if let Some(external) = self.forward.get(&Symbol::External(name.to_string())) {
             external.clone()
         } else {
-            panic!("No symbol named {:?}", name)
+            println!("No symbol named {:?}", name);
+            self.forward.get(&Symbol::External("explode".to_string())).unwrap().clone()
         }
     }
     pub fn lookup_symbol(&self, sym: &Symbol) -> Value {

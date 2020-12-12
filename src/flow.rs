@@ -4,7 +4,7 @@ use crate::value::Value;
 use crate::layout::Layout;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use crate::data::DataFlow;
+use crate::data::{DataFlow, Thunk};
 use crate::process::{Process};
 use llvm_ir::DebugLoc;
 
@@ -27,13 +27,8 @@ impl FlowCtx {
         for farg in fargs.iter() {
             thunks.push(self.data.constant(self.backtrace.clone(), (*farg).clone()).await);
         }
-        self.process.reverse_lookup_fun(&fun)
-            .call_imp(&self.with_frame(BacktraceFrame::new(0xFFFF_FFFF, DebugLoc {
-                line: 0,
-                col: None,
-                filename: "<native>".to_string(),
-                directory: None,
-            })), &thunks).await.await
+        let fun = self.process.reverse_lookup_fun(&fun);
+        fun.call_imp(self, &thunks).await.await
     }
 
     pub fn with_frame(&self, frame: BacktraceFrame) -> Self {
@@ -46,8 +41,9 @@ impl FlowCtx {
 
     pub async fn alloc(&self, layout: Layout) -> Value {
         let threadid = self.data.threadid();
-        self.data.thunk(format!("alloc({:?})", layout), self.backtrace.clone(), vec![], move |comp, _| {
-            comp.process.alloc(threadid, layout)
+        let process = self.process.clone();
+        self.data.thunk(self.backtrace.clone(), vec![], move |comp, _| {
+            process.alloc(threadid, layout)
         }).await.await
     }
 
@@ -90,6 +86,11 @@ impl FlowCtx {
                       Layout::from_bytes(len.as_u64(), 1)).await.as_bytes().to_vec()).unwrap()
     }
 
+    pub async fn constant(&self, constant: Value) -> Thunk {
+        self.data.constant(self.backtrace.clone(), constant).await
+    }
+
+    pub fn process(&self) -> &Process { &self.process }
     pub fn data(&self) -> &DataFlow {
         &self.data
     }

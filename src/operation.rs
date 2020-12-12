@@ -1,5 +1,5 @@
 use llvm_ir::{TypeRef, Type, IntPredicate, FPPredicate};
-use crate::value::Value;
+use crate::value::{Value, add_u64_i64};
 use std::ops::Add;
 use std::iter;
 use crate::layout::{Layout, Packing};
@@ -42,6 +42,7 @@ pub enum CFPPredicate {
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum COperationName {
+    Xchg,
     Add,
     Sub,
     Mul,
@@ -67,7 +68,7 @@ pub enum COperationName {
     ExtractElement,
     ExtractValue(Vec<i64>),
     InsertElement,
-    InsertValue,
+    InsertValue(Vec<i64>),
     Shuffle(Vec<i64>),
     Trunc(Class),
     ZExt(Class),
@@ -79,6 +80,7 @@ pub enum COperationName {
     UIToFP(Class),
     SIToFP(Class),
     BitCast(Class),
+    Select,
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -95,7 +97,8 @@ impl COperation {
     pub fn call_operation(&self, inputs: &[&Value]) -> Value {
         use COperationName::*;
         match &self.name {
-            Add
+            Xchg
+            | Add
             | Sub
             | Mul
             | UDiv
@@ -134,22 +137,63 @@ impl COperation {
                     _ => todo!(),
                 }
             }
-            BitCast(_) => todo!(),
-            GetElementPtr => todo!(),
-            ExtractElement => todo!(),
-            ExtractValue(indices) => {
-                todo!()
+            BitCast(x) => {
+                inputs[0].ucast(x.layout())
             }
-            InsertElement => todo!(),
-            InsertValue => todo!(),
-            Shuffle(indices) => todo!(),
+            GetElementPtr => {
+                let bit_offset = self.input[0].element_rec(&mut inputs[1..].iter().map(|v| v.as_i64())).bit_offset;
+                assert_eq!(bit_offset % 8, 0);
+                Value::new(self.output.layout().bits(), add_u64_i64(inputs[0].as_u64(), bit_offset / 8) as u128)
+            }
+            ExtractElement => {
+                let element = self.input[0].element(inputs[1].as_i64());
+                inputs[0].extract_bits(element.bit_offset, element.class.layout().bits())
+            }
+            ExtractValue(indices) => {
+                let element = self.input[0].element_rec(&mut indices.iter().cloned());
+                inputs[0].extract_bits(element.bit_offset, element.class.layout().bits())
+            }
+            InsertElement => {
+                let element = self.input[0].element(inputs[2].as_i64());
+                let mut result = inputs[0].clone();
+                result.insert_bits(element.bit_offset, inputs[1]);
+                result
+            }
+            InsertValue(indices) => {
+                let element = self.input[0].element_rec(&mut indices.iter().cloned());
+                let mut result = inputs[0].clone();
+                result.insert_bits(element.bit_offset, inputs[1]);
+                result
+            }
+            Shuffle(indices) => {
+                let v1 = self.input[0].as_vector().unwrap();
+                let v2 = self.input[1].as_vector().unwrap();
+                let mut result = Value::zero(self.output.layout().bits());
+                for (wi, ri) in indices.iter().enumerate() {
+                    let e = if *ri < v1.len as i64 {
+                        inputs[0].extract(&self.input[0], *ri)
+                    } else {
+                        inputs[0].extract(&self.input[0], *ri - v1.len as i64)
+                    };
+                    result.insert(&self.output, wi as i64, &e);
+                }
+                result
+            }
+            Select => {
+                if inputs[0].unwrap_bool() {
+                    inputs[1].clone()
+                } else {
+                    inputs[2].clone()
+                }
+            }
         }
     }
 
     pub fn call_scalar(&self, inputs: &[&Value]) -> Value {
         use COperationName::*;
         match &self.name {
-            Add
+            Xchg
+            | Add
             | Sub
             | Mul
             | UDiv
@@ -172,7 +216,14 @@ impl COperation {
                 self.call_scalar_binop(inputs[0], inputs[1]),
             | SExt(_) => self.call_scalar_sext(inputs[0]),
             | ZExt(_) => inputs[0].ucast(self.output.layout()),
-            _ => todo!()
+            | Trunc(_) => inputs[0].ucast(self.output.layout()),
+            | FPTrunc(_) => todo!(),
+            | FPExt(_) => todo!(),
+            | FPToUI(_) => todo!(),
+            | FPToSI(_) => todo!(),
+            | UIToFP(_) => todo!(),
+            | SIToFP(_) => todo!(),
+            _ => unreachable!("{:?}", self.name)
         }
     }
 
@@ -228,15 +279,14 @@ impl COperation {
             bits => todo!("{:?}", bits),
         }
     }
-
 }
 
 pub fn call_scalar_lshr(v1: &Value, v2: &Value) -> Value {
-    let width = v1.bits() as usize;
-    let shift = v2.as_u64() as usize;
-    let mut output = BitVec::repeat(false, width);
-    output[..width - shift].copy_from_bitslice(&v1.as_bits()[shift..]);
-    Value::from_bits(output)
+    let width = v1.bits();
+    let shift = v2.as_u64();
+    let mut output = Value::zero(width);
+    output[..width - shift].copy_from_bitslice(&v1[shift..]);
+    output
 }
 
 fn call_scalar_binop_unsigned<T1, T8, T16, T32, T64, T128>

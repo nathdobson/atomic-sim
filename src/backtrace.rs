@@ -20,7 +20,7 @@ pub struct Backtrace(Rc<BacktraceInner>);
 #[derive(Debug)]
 struct BacktraceFrameInner {
     pub ip: u64,
-    pub loc: DebugLoc,
+    pub loc: String,
 }
 
 #[derive(Clone)]
@@ -46,13 +46,13 @@ impl Backtrace {
 }
 
 impl BacktraceFrame {
-    pub fn new(ip: u64, loc: DebugLoc) -> Self {
+    pub fn new(ip: u64, loc:String) -> Self {
         BacktraceFrame(Rc::new(BacktraceFrameInner { ip, loc }))
     }
     pub fn ip(&self) -> u64 {
         self.0.ip
     }
-    pub fn loc(&self) -> &DebugLoc {
+    pub fn loc(&self) -> &str {
         &self.0.loc
     }
 }

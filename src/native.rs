@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use crate::layout::Layout;
 use crate::value::Value;
-use crate::function::{Func};
-use crate::data::{Thunk};
+use crate::function::{Func, native_comp_new, native_exec_new};
+use crate::data::{Thunk, ComputeCtx};
 use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use std::marker::PhantomData;
@@ -10,51 +10,8 @@ use futures::FutureExt;
 use crate::backtrace::BacktraceFrame;
 use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
-use crate::compute::ComputeCtx;
-use crate::ctx::EvalCtx;
 use crate::layout::Packing;
-
-struct NativeComp<'ctx> {
-    name: &'ctx str,
-    imp: Rc<dyn 'ctx + for<'comp> Fn(ComputeCtx<'ctx, 'comp>, &'comp [&'comp Value]) -> Value>,
-}
-
-struct NativeExec<'ctx> {
-    name: &'ctx str,
-    imp: Rc<dyn 'ctx + for<'flow> Fn(&'flow FlowCtx<'ctx, 'flow>, &'flow [Value]) -> LocalBoxFuture<'flow, Value>>,
-}
-
-impl<'ctx> Func<'ctx> for NativeComp<'ctx> {
-    fn name(&self) -> &'ctx str {
-        self.name
-    }
-
-
-    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
-        let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(self.name.to_string(), flow.backtrace().clone(), args.to_vec(),
-                                   move |comp: ComputeCtx<'ctx, '_>, args| {
-                                       imp(comp, args)
-                                   }))
-    }
-}
-
-impl<'ctx> Func<'ctx> for NativeExec<'ctx> {
-    fn name(&self) -> &'ctx str {
-        self.name
-    }
-
-
-    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx<'ctx, 'flow>, args: &'flow [Thunk<'ctx>]) -> LocalBoxFuture<'flow, Thunk<'ctx>> {
-        Box::pin(async move {
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(arg.clone().await);
-            }
-            flow.data().constant(flow.backtrace().clone(), (self.imp)(flow, &values).await).await
-        })
-    }
-}
+use crate::function::NativeBomb;
 
 macro_rules! overflow_binop {
     ($uop:expr, $sop:expr, $wrapping:ident, $checked:ident) => {
@@ -76,10 +33,11 @@ macro_rules! overflow_binop {
             &**Box::leak(Box::new(format!("llvm.{}.with.overflow.{}", $op, $ty))),
             move |comp, [x,y]| {
                 let (x, y) = (x.$unwrap(), y.$unwrap());
-                Value::aggregate([
-                                     Value::from(x.$wrapping(y)),
-                                     Value::from(x.$checked(y).is_none())
-                                 ].iter().cloned(), Packing::None)
+                let types = comp.process.types();
+                let v1 = Value::from(x.$wrapping(y));
+                let v2 = Value::from(x.$checked(y).is_none());
+                let class = types.struc(vec![types.int(v1.bits()), types.int(v2.bits())], false);
+                Value::aggregate(&class, [v1, v2].iter().cloned())
             }
         )
     }
@@ -105,48 +63,10 @@ macro_rules! unop {
     }
 }
 
-pub fn native_comp_new<'ctx, const N: usize>(
-    name: &'ctx str,
-    imp: impl 'static + for<'comp> Fn(ComputeCtx<'ctx, 'comp>, [Value; N]) -> Value)
-    -> Rc<dyn 'ctx + Func<'ctx>>
-    where [Value; N]: Default {
-    Rc::new(NativeComp {
-        name: name,
-        imp: Rc::new(move |comp, args| {
-            assert_eq!(args.len(), N, "{:?}", name);
-            let mut array = <[Value; N]>::default();
-            for (p, a) in array.iter_mut().zip(args.iter()) {
-                *p = (*a).clone();
-            }
-            imp(comp, array)
-        }),
-    })
-}
 
-pub fn native_exec_new<'ctx, const N: usize, F>(
-    name: &'ctx str,
-    imp: F)
-    -> Rc<dyn 'ctx + Func<'ctx>>
-    where [Value; N]: Default,
-          F: 'static + for<'flow> Fn(&'flow FlowCtx<'ctx, 'flow>, [Value; N]) -> LocalBoxFuture<'flow, Value>
-{
-    let imp = Rc::new(imp);
-    Rc::new(NativeExec {
-        name,
-        imp: Rc::new(move |flow, args| {
-            let imp = imp.clone();
-            async move {
-                assert_eq!(args.len(), N);
-                let mut array = <[Value; N]>::default();
-                array.clone_from_slice(args);
-                imp(flow, array).await
-            }
-        }.boxed_local()),
-    })
-}
 
-pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
-    let mut result: Vec<Rc<dyn 'ctx + Func<'ctx>>> = vec![];
+pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
+    let mut result: Vec<Rc<dyn 'static + Func>> = vec![];
     result.append(&mut vec![
         native_comp_new("llvm.dbg.declare", |comp, [_, _, _]| {
             Value::from(())
@@ -155,7 +75,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             Value::from(())
         }),
         native_comp_new("signal", |comp, [_, _]| {
-            Value::new(comp.ctx().ptr_bits, 0)
+            comp.process.null()
         }),
         native_comp_new("sysconf", |comp, [flag]| {
             Value::from(match flag.unwrap_u32() {
@@ -172,10 +92,6 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             Value::new(32, 0)
         }),
         native_comp_new("pthread_mutex_lock", |comp, [_]| {
-            //TODO synchronize lock
-            Value::new(32, 0)
-        }),
-        native_comp_new("pthread_mutex_unlock", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
@@ -204,17 +120,17 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             Value::new(32, 0)
         }),
         native_comp_new("pthread_self", |comp, []| {
-            comp.ctx().value_from_address(0)
+            comp.process.null()
         }),
         native_comp_new("pthread_get_stackaddr_np", |comp, [_]| {
-            comp.ctx().value_from_address(0)
+            comp.process.value_from_address(0)
         }),
         native_comp_new("pthread_get_stacksize_np", |comp, [_]| {
-            comp.ctx().value_from_address(0)
+            comp.process.value_from_address(0)
         }),
         native_comp_new("pthread_attr_init", |comp, [attr]| {
             let value = [0xFFu8; 64];
-            comp.process.store(comp.threadid, &attr, &Value::from_bytes(&value, Layout::from_bytes(value.len() as u64, 1)), None);
+            comp.process.store(comp.threadid, &attr, &Value::from_bytes_exact(&value), None);
             Value::from(0u32)
         }),
         native_comp_new("pthread_attr_setstacksize", |comp, [attr, stacksize]| {
@@ -279,7 +195,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             let fd = fd.unwrap_u32();
             let offset = offset.as_u64();
             println!("mmap {:?}", addr);
-            comp.ctx().value_from_address(addr)
+            comp.process.value_from_address(addr)
         }),
         native_comp_new("mprotect", |comp, [addr, length, prot]| {
             let addr = addr.as_u64();
@@ -289,8 +205,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         }),
         native_comp_new("llvm.memset.p0i8.i64", |comp, [addr, val, len, _]| {
             comp.process.store(comp.threadid, &addr,
-                               &Value::from_bytes(&vec![val.unwrap_u8(); len.as_u64() as usize],
-                                                  Layout::from_bytes(len.as_u64(), 1)),
+                               &Value::from_bytes_exact(&vec![val.unwrap_u8(); len.as_u64() as usize]),
                                None);
             Value::from(())
         }),
@@ -317,21 +232,21 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         }),
         native_comp_new("memchr", |comp, [ptr, value, num]| {
             for i in 0..num.as_u64() {
-                let ptr = comp.ctx().value_from_address(ptr.as_u64() + i);
+                let ptr = comp.process.value_from_address(ptr.as_u64() + i);
                 let v = comp.process.load(comp.threadid, &ptr, Layout::from_bytes(1, 1), None);
                 if v.unwrap_u8() as u32 == value.unwrap_u32() {
                     return ptr;
                 }
             }
-            comp.ctx().value_from_address(0)
+            comp.process.value_from_address(0)
         }),
         native_exec_new("strlen", |flow, [str]| async move {
             flow.strlen(&str).await
         }.boxed_local()),
         native_comp_new("memcmp", |comp, [ptr1, ptr2, num]| {
             for i in 0..num.as_u64() {
-                let ptr1 = comp.ctx().value_from_address(ptr1.as_u64() + i);
-                let ptr2 = comp.ctx().value_from_address(ptr2.as_u64() + i);
+                let ptr1 = comp.process.value_from_address(ptr1.as_u64() + i);
+                let ptr2 = comp.process.value_from_address(ptr2.as_u64() + i);
                 let v1 = comp.process.load(comp.threadid, &ptr1, Layout::from_bytes(1, 1), None);
                 let v2 = comp.process.load(comp.threadid, &ptr2, Layout::from_bytes(1, 1), None);
                 match v1.unwrap_u8().cmp(&v2.unwrap_u8()) {
@@ -353,7 +268,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                 "RUST_BACKTRACE" => {
                     flow.string("full").await
                 }
-                _ => flow.ctx().value_from_address(0)
+                _ => flow.process().value_from_address(0)
             }
         }.boxed_local()),
         native_comp_new("getcwd", |comp, [buf, size]| {
@@ -376,11 +291,35 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             "_Unwind_Backtrace",
             |flow, [trace, trace_argument]| async move {
                 for bt in flow.backtrace().iter() {
-                    let bctx = flow.ctx().value_from_address(bt.ip + 1);
+                    let bctx = flow.process().value_from_address(bt.ip() + 1);
                     let ret = flow.invoke(&trace, &[&bctx, &trace_argument]).await;
                 }
                 Value::from(0u32)
             }.boxed_local()),
+        native_comp_new("_Unwind_GetTextRelBase", |comp, [_]| {
+            comp.process.null()
+        }),
+        native_comp_new("_Unwind_GetDataRelBase", |comp, [_]| {
+            comp.process.null()
+        }),
+        native_comp_new("_Unwind_GetLanguageSpecificData", |comp, [_, _]| {
+            comp.process.null()
+        }),
+        native_comp_new("_Unwind_GetIPInfo", |comp, [_, _]| {
+            comp.process.null()
+        }),
+        native_comp_new("_Unwind_GetRegionStart", |comp, [_, _]| {
+            comp.process.null()
+        }),
+        native_comp_new("_Unwind_SetGR", |comp, [_, _, _]| {
+            Value::from(())
+        }),
+        native_comp_new("_Unwind_SetIP", |comp, [_, _, _]| {
+            Value::from(())
+        }),
+        native_comp_new("explode", |comp, []| {
+            panic!();
+        }),
         native_exec_new(
             "_Unwind_GetIP",
             |flow, [bctx]| async move {
@@ -389,12 +328,12 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         native_exec_new(
             "_NSGetExecutablePath",
             |flow, [buf, len_ptr]| async move {
-                let len = flow.load(&len_ptr, flow.ctx().layout_of_ptr()).await;
+                let len = flow.load(&len_ptr, flow.process().layout_of_ptr()).await;
                 let filename = b"unknown.rs\0";
                 if len.as_u64() < filename.len() as u64 {
                     return Value::from(0u32);
                 }
-                flow.store(&buf, &Value::from_bytes_unaligned(filename)).await;
+                flow.store(&buf, &Value::from_bytes_exact(filename)).await;
                 flow.store(&len_ptr, &Value::from(filename.len() as u32)).await;
                 Value::from(0u32)
             }.boxed_local()),
@@ -407,9 +346,9 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
         native_exec_new(
             "__rdos_backtrace_syminfo",
             |flow, [state, addr, cb, error, data]| async move {
-                let zero = flow.ctx().null();
-                let one = flow.ctx().value_from_address(1);
-                let name = flow.string(&format!("{:?}", flow.ctx().reverse_lookup(&addr))).await;
+                let zero = flow.process().null();
+                let one = flow.process().value_from_address(1);
+                let name = flow.string(&format!("{:?}", flow.process().reverse_lookup(&addr))).await;
                 flow.invoke(&cb, &[&data, &addr, &name, &addr, &one]).await;
                 Value::from(0u32)
             }.boxed_local()),
@@ -427,15 +366,15 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
             }.boxed_local()),
         native_exec_new("dlsym", |flow, [handle, name]| async move {
             let name = flow.get_string(&name).await;
-            flow.ctx().lookup(EvalCtx { module: None }, &name).clone()
+            flow.process().lookup(None, &name).clone()
         }.boxed_local()),
         native_exec_new(
             "__rdos_backtrace_pcinfo",
             |flow, [state, pc, cb, error, data]| async move {
                 //println!("Calling __rdos_backtrace_pcinfo({:?}, {:?}, {:?}, {:?}, {:?})", state, pc, cb, error, data);
-                let null = flow.ctx().null();
-                let symbol = flow.ctx().reverse_lookup(&pc);
-                let fun = flow.ctx().functions.get(&symbol).unwrap();
+                let null = flow.process().null();
+                let symbol = flow.process().reverse_lookup(&pc);
+                let fun = flow.process().reverse_lookup_fun(&pc);//functions.get(&symbol).unwrap();
                 let symbol_name = flow.string(&format!("{:?}", symbol)).await;
                 let debugloc = fun.debugloc();
                 let (filename, line) = if let Some(debugloc) = debugloc {
@@ -448,7 +387,7 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
                 Value::from(0u32)
             }.boxed_local()),
         native_exec_new("getentropy", |flow, [buf, len]| async move {
-            let data = Value::from_bytes_unaligned(&vec![4/*chosen by fair dice roll.*/; len.as_u64() as usize]);
+            let data = Value::from_bytes_exact(&vec![4/*chosen by fair dice roll.*/; len.as_u64() as usize]);
             flow.store(&buf, &data).await;
             Value::from(0u32)
         }.boxed_local()),
@@ -458,6 +397,125 @@ pub fn builtins<'ctx>() -> Vec<Rc<dyn 'ctx + Func<'ctx>>> {
     result.append(&mut overflow_binop!("usub", "ssub", wrapping_sub, checked_sub));
     result.append(&mut unop!("cttz", trailing_zeros));
     result.append(&mut unop!("ctlz", leading_zeros));
+    for name in &[
+        "_NSGetArgc",
+        "_NSGetArgv",
+        "_NSGetEnviron",
+        "__error",
+        "__rust_alloc_zeroed",
+        "_exit",
+        "abort",
+        "accept",
+        "bind",
+        "calloc",
+        "chdir",
+        "chmod",
+        "close$NOCANCEL",
+        "closedir",
+        "connect",
+        "copyfile_state_alloc",
+        "copyfile_state_free",
+        "copyfile_state_get",
+        "dup2",
+        "execvp",
+        "exit",
+        "fchmod",
+        "fcntl",
+        "fcopyfile",
+        "fork",
+        "free",
+        "freeaddrinfo",
+        "fstat$INODE64",
+        "ftruncate",
+        "gai_strerror",
+        "getaddrinfo",
+        "getpeername",
+        "getpid",
+        "getppid",
+        "getpwuid_r",
+        "getsockname",
+        "getsockopt",
+        "gettimeofday",
+        "getuid",
+        "ioctl",
+        "kill",
+        "link",
+        "listen",
+        "llvm.usub.sat.i64",
+        "llvm.bswap.i128",
+        "llvm.bswap.i16",
+        "llvm.bswap.i32",
+        "llvm.bswap.v8i16",
+        "llvm.ctpop.i32",
+        "llvm.fshr.i32",
+        "llvm.uadd.sat.i64",
+        "lseek",
+        "lstat$INODE64",
+        "mach_absolute_time",
+        "mach_timebase_info",
+        "malloc",
+        "mkdir",
+        "munmap",
+        "nanosleep",
+        "opendir$INODE64",
+        "pipe",
+        "poll",
+        "posix_memalign",
+        "posix_spawn_file_actions_adddup2",
+        "posix_spawn_file_actions_destroy",
+        "posix_spawn_file_actions_init",
+        "posix_spawnattr_destroy",
+        "posix_spawnattr_init",
+        "posix_spawnattr_setflags",
+        "posix_spawnattr_setsigdefault",
+        "posix_spawnattr_setsigmask",
+        "posix_spawnp",
+        "pread",
+        "pthread_cond_broadcast",
+        "pthread_cond_destroy",
+        "pthread_cond_signal",
+        "pthread_cond_timedwait",
+        "pthread_cond_wait",
+        "pthread_detach",
+        "pthread_key_create",
+        "pthread_key_delete",
+        "pthread_rwlock_wrlock",
+        "pthread_setname_np",
+        "pthread_sigmask",
+        "pwrite",
+        "read",
+        "readdir_r$INODE64",
+        "readlink",
+        "readv",
+        "realloc",
+        "realpath$DARWIN_EXTSN",
+        "recv",
+        "recvfrom",
+        "rename",
+        "rmdir",
+        "sched_yield",
+        "send",
+        "sendto",
+        "setenv",
+        "setgid",
+        "setgroups",
+        "setsockopt",
+        "setuid",
+        "shutdown",
+        "sigaddset",
+        "sigemptyset",
+        "socket",
+        "socketpair",
+        "stat$INODE64",
+        "strerror_r",
+        "symlink",
+        "unlink",
+        "unsetenv",
+        "waitpid",
+        "writev",
+    ] {
+        result.push(Rc::new(NativeBomb { name: name.to_string() }));
+    }
     result
 }
 
