@@ -4,8 +4,7 @@ use std::collections::btree_map;
 use std::cmp::Ordering;
 use itertools::Itertools;
 use std::{mem, fmt};
-use std::fmt::Debug;
-use smallvec::alloc::fmt::Formatter;
+use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
 
 #[derive(Clone)]

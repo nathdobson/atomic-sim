@@ -13,7 +13,8 @@ use bitvec::slice::BitSlice;
 use smallvec::SmallVec;
 
 //TODO
-type Impl = Vec<u8>;
+//type Impl = Vec<u8>;
+type Impl = SmallVec<[u8; 16]>;
 
 pub type ValueSlice = BitSlice<Lsb0, u8>;
 

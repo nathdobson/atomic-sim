@@ -14,6 +14,8 @@ defer = "0.1.0"
 bitvec = "0.19.4"
 itertools = "0.9.0"
 vec_map = "0.8.2"
-smallvec = "1.5.1"
 rangemap = "0.1.8"
 
+[dependencies.smallvec]
+version = "1.5.1"
+features = ["union", "specialization"]

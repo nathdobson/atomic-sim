@@ -18,6 +18,7 @@ use crate::thread::{Thread, ThreadId};
 use std::ops::Deref;
 use std::task::{Poll, Context};
 use crate::future::pending_once;
+use crate::freelist::{Frc, FreeList};
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -25,6 +26,7 @@ pub struct DataFlowInner {
     process: Process,
     threadid: ThreadId,
     seq: usize,
+    freelist: FreeList<ThunkInner>,
     thunks: BTreeMap<usize, Thunk>,
 }
 
@@ -72,7 +74,7 @@ pub struct ThunkInner {
 }
 
 #[derive(Clone)]
-pub struct Thunk(Rc<ThunkInner>);
+pub struct Thunk(Frc<ThunkInner>);
 
 impl Thunk {
     pub fn try_get(&self) -> Option<&Value> {
@@ -129,10 +131,15 @@ impl Thunk {
 }
 
 
-
 impl DataFlow {
     pub fn new(process: Process, threadid: ThreadId) -> Self {
-        DataFlow(Rc::new(RefCell::new(DataFlowInner { process, threadid, seq: 0, thunks: BTreeMap::new() })))
+        DataFlow(Rc::new(RefCell::new(DataFlowInner {
+            process,
+            threadid,
+            seq: 0,
+            freelist: FreeList::new(),
+            thunks: BTreeMap::new(),
+        })))
     }
     pub async fn thunk(&self, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
         while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
@@ -141,7 +148,7 @@ impl DataFlow {
         let mut this = self.0.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
-        let thunk: Thunk = Thunk(Rc::new(ThunkInner {
+        let thunk: Thunk = Thunk(this.freelist.alloc(ThunkInner {
             process: this.process.clone(),
             threadid: this.threadid,
             seq,

@@ -9,6 +9,9 @@
 #![feature(duration_zero)]
 #![feature(bound_cloned)]
 #![feature(iter_map_while)]
+#![feature(new_uninit)]
+#![feature(maybe_uninit_extra)]
+#![feature(maybe_uninit_ref)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
@@ -22,6 +25,7 @@ use crate::symbols::{SymbolTable, Symbol, ModuleId};
 use crate::process::Process;
 use std::panic::AssertUnwindSafe;
 use std::thread::spawn;
+use std::time::Instant;
 
 //mod process;
 mod layout;
@@ -51,6 +55,7 @@ mod operation;
 mod interp;
 mod future;
 mod rangemap;
+mod freelist;
 
 pub fn main() {
     // use crate::thread::Thread;
@@ -88,11 +93,13 @@ pub fn main() {
 
     process.add_thread(Symbol::External("main".to_string()));
     println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| {
+        let start = Instant::now();
         for i in 0.. {
             if !process.step() {
                 break;
             }
         }
+        println!("{:?}", Instant::now() - start);
     })));
     mem::drop(process_scope);
     // let modules = &modules;
