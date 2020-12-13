@@ -7,6 +7,8 @@
 #![feature(once_cell)]
 #![feature(box_syntax)]
 #![feature(duration_zero)]
+#![feature(bound_cloned)]
+#![feature(iter_map_while)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
@@ -48,6 +50,7 @@ mod lazy;
 mod operation;
 mod interp;
 mod future;
+mod rangemap;
 
 pub fn main() {
     // use crate::thread::Thread;

@@ -10,25 +10,24 @@ use std::fmt;
 use llvm_ir::module::Linkage;
 use std::cell::RefCell;
 use crate::thread::ThreadId;
+use crate::by_address::ByAddress;
+use std::rc::Rc;
+use crate::rangemap::RangeMap;
 
-#[derive(Clone)]
-pub struct Alloc {
-    ptr: u64,
-    len: u64,
-    stores: Vec<StoreLog>,
-    freed: bool,
+#[derive(Debug)]
+struct LogInner {
+    start: u64,
+    value: Vec<u8>,
+    pred: RangeMap<u64, Log>,
 }
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+struct Log(ByAddress<Rc<LogInner>>);
 
 #[derive(Clone)]
 pub struct Memory {
-    allocs: BTreeMap<u64, Alloc>,
+    cells: RangeMap<u64, Log>,
     next: u64,
-}
-
-#[derive(Clone)]
-struct StoreLog {
-    pos: u64,
-    value: Vec<u8>,
 }
 
 const HEAP_GUARD: u64 = 128;
@@ -36,109 +35,51 @@ const HEAP_GUARD: u64 = 128;
 impl Memory {
     pub fn new() -> Self {
         Memory {
-            allocs: BTreeMap::new(),
+            cells: RangeMap::new(),
             next: 128,
         }
     }
     pub fn free(&mut self, ptr: &Value) {
-        let freed =
-            &mut self.allocs.get_mut(&ptr.as_u64())
-                .unwrap_or_else(|| panic!("Cannot free {:?}", ptr.as_u64()))
-                .freed;
-        assert!(!*freed);
-        *freed = true;
+        //TODO
     }
     pub fn alloc(&mut self, layout: Layout) -> Value {
         let len = layout.bytes();
         let align = layout.byte_align();
         let result = align_to(self.next, align);
         self.next = result + len + HEAP_GUARD;
-        self.allocs.insert(result, Alloc { ptr: result, len, stores: vec![], freed: false });
         Value::from(result)
     }
-    fn find_alloc_mut(&mut self, ptr: &Value) -> &mut Alloc {
-        let alloc = self.allocs.range_mut(..=ptr.as_u64())
-            .next_back()
-            .unwrap_or_else(|| panic!("Could not find alloc {:?}", ptr)).1;
-        assert!(!alloc.freed);
-        alloc
-    }
-    fn find_alloc(&self, ptr: &Value) -> &Alloc {
-        let alloc = self.allocs.range(..=ptr.as_u64())
-            .next_back()
-            .unwrap_or_else(|| panic!("Could not find alloc {:?}", ptr)).1;
-        assert!(!alloc.freed);
-        alloc
-    }
     pub fn store(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, _atomicity: Option<Atomicity>) {
+        let start = ptr.as_u64();
         let value = value.as_bytes().to_vec();
-        let len = value.len() as u64;
-        let alloc = self.find_alloc_mut(ptr);
-        let ptr = ptr.as_u64();
-        assert!(alloc.ptr <= ptr && ptr + len <= alloc.ptr + alloc.len, "store overflow at {:?} length {:?} region {:?}", ptr, len, alloc);
-        alloc.stores.push(
-            StoreLog {
-                pos: ptr,
-                value,
-            }
-        );
+        let range = start..start + value.len() as u64;
+        let pred =
+            self.cells
+                .range(range.clone())
+                .map(|(k, v)| (k, v.clone()))
+                .collect();
+        let log = Log(ByAddress(Rc::new(LogInner { start, value, pred })));
+        self.cells.insert(range, log);
     }
     pub fn load(&mut self, ptr: &Value, layout: Layout, _atomicity: Option<Atomicity>) -> Value {
-        let mut bytes = vec![0u8; layout.bytes() as usize];
-        let mut missing = (0..layout.bytes()).collect::<HashSet<_>>();
-        let alloc = self.find_alloc_mut(ptr);
-        assert!(alloc.ptr <= ptr.as_u64() && ptr.as_u64() + layout.bytes() <= alloc.ptr + alloc.len, "load overflow at {:?} length {:?} region {:?}", ptr, layout.bytes(), alloc);
-        //println!("Loading {:?}[{:?}] from {:?}", ptr, layout, alloc);
-        for store in alloc.stores.iter().rev() {
-            let ptr = ptr.as_u64();
-            for i in missing.iter() {
-                let r = store.pos..store.pos + store.value.len() as u64;
-                let p = ptr + *i;
-                if r.contains(&p) {
-                    bytes[*i as usize] = store.value[(ptr + *i - store.pos) as usize];
-                }
-            }
-            for i in store.pos..store.pos + store.value.len() as u64 {
-                if i >= ptr {
-                    missing.remove(&(i - ptr));
-                }
-            }
-            if missing.is_empty() {
-                break;
-            }
+        let start = ptr.as_u64();
+        let range = start..start + layout.bytes();
+        let mut result = Value::zero(layout.bits());
+        for (r, v) in self.cells.range(range) {
+            result.as_bytes_mut()[(r.start - start) as usize..(r.end - start) as usize]
+                .copy_from_slice(&v.0.value[(r.start - v.0.start) as usize..(r.end - v.0.start) as usize]);
         }
-        Value::from_bytes(&bytes, layout.bits())
+        result
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
-        format!("{:?}", self.find_alloc(ptr))
+        todo!()
     }
 }
 
 impl Debug for Memory {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Memory")
-            .field("allocs", &self.allocs)
-            .finish()
-    }
-}
-
-impl Debug for StoreLog {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StoreLog")
-            .field("pos", &Value::from(self.pos))
-            .field("value",
-                   &Value::from_bytes_exact(&self.value))
-            .finish()
-    }
-}
-
-impl Debug for Alloc {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Alloc")
-            .field("ptr", &Value::from(self.ptr))
-            .field("len", &Value::from(self.len))
-            .field("store", &self.stores)
-            .field("freed", &self.freed)
+            .field("cells", &self.cells)
             .finish()
     }
 }

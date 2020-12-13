@@ -90,6 +90,9 @@ impl Value {
     pub fn as_bytes(&self) -> &[u8] {
         self.imp.as_slice()
     }
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        self.imp.as_mut_slice()
+    }
     pub fn from_bytes(bytes: &[u8], bits: u64) -> Self {
         assert_eq!(bytes.len() as u64, (bits + 7) / 8);
         let mut imp = Impl::with_capacity(bytes.len());
