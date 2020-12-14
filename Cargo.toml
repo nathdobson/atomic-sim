@@ -21,6 +21,10 @@ lazy_static = "1.4.0"
 version = "1.5.1"
 features = ["union", "specialization"]
 
+[dev-dependencies]
+futures = "0.3.8"
+
+
 [features]
 timer = []
 

@@ -59,6 +59,7 @@ mod rangemap;
 mod freelist;
 #[macro_use]
 mod timer;
+mod recursor;
 
 pub fn main() {
     // use crate::thread::Thread;
