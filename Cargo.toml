@@ -15,7 +15,14 @@ bitvec = "0.19.4"
 itertools = "0.9.0"
 vec_map = "0.8.2"
 rangemap = "0.1.8"
+lazy_static = "1.4.0"
 
 [dependencies.smallvec]
 version = "1.5.1"
 features = ["union", "specialization"]
+
+[features]
+timer = []
+
+[profile.release]
+debug = true

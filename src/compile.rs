@@ -20,8 +20,10 @@ use llvm_ir::constant::Float;
 use llvm_ir::types::FPType;
 use crate::function::Func;
 use crate::flow::FlowCtx;
-use crate::data::Thunk;
+use crate::data::{Thunk, DataFlow, ThunkInner, ThunkState};
 use crate::backtrace::BacktraceFrame;
+use crate::freelist::FreeList;
+use std::cell::RefCell;
 
 #[derive(Debug)]
 pub struct CFunc {
@@ -175,7 +177,7 @@ pub enum CTerm {
 
 #[derive(Debug)]
 pub enum COperand {
-    Constant(Class, Value),
+    Constant(Class, Thunk),
     Local(Class, CLocal),
     Inline,
 }
@@ -213,16 +215,21 @@ impl FuncCompiler {
     fn compile_const(&mut self, constant: &ConstantRef) -> (Class, Value) {
         self.module_compiler.compile_const(constant)
     }
+
+    fn constant_thunk(&mut self, value: Value) -> Thunk {
+        Thunk::constant(self.module_compiler.process.clone(), value)
+    }
+
     fn compile_operand(&mut self, operand: &Operand) -> COperand {
         match operand {
             Operand::LocalOperand { name, ty } =>
                 COperand::Local(self.type_map.get(ty), self.compile_local(name)),
             Operand::ConstantOperand(expr) => {
                 let (class, value) = self.compile_const(expr);
-                COperand::Constant(class, value)
+                COperand::Constant(class, self.constant_thunk(value))
             }
             Operand::MetadataOperand =>
-                COperand::Constant(self.type_map.void(), Value::from(())),
+                COperand::Constant(self.type_map.void(), self.constant_thunk(Value::from(()))),
         }
     }
 
@@ -374,7 +381,7 @@ impl FuncCompiler {
                     let operand = self.compile_operand(index);
                     match &operand {
                         COperand::Constant(_, c) =>
-                            output = output.element(c.as_i64()).class,
+                            output = output.element(c.try_get().unwrap().as_i64()).class,
                         COperand::Local(_, _) =>
                             output = output.element(-1).class,
                         COperand::Inline => todo!(),
@@ -552,7 +559,7 @@ impl FuncCompiler {
                 let return_operand = if let Some(return_operand) = return_operand {
                     self.compile_operand(return_operand)
                 } else {
-                    COperand::Constant(self.type_map.void(), Value::from(()))
+                    COperand::Constant(self.type_map.void(), self.constant_thunk(Value::from(())))
                 };
                 CTerm::Ret(CRet { return_operand })
             }

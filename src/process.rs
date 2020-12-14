@@ -25,6 +25,7 @@ use crate::memory::Memory;
 use crate::thread::{ThreadId, Thread};
 use crate::class::TypeMap;
 use crate::native;
+use crate::timer;
 
 pub struct ProcessInner {
     functions: HashMap<u64, Rc<dyn Func>>,
@@ -79,6 +80,7 @@ impl Process {
                                            thread);
     }
     pub fn step(&self) -> bool {
+        timer!("Process::step");
         let (threadid, thread) = {
             let mut this = self.0.borrow_mut();
             let this = this.deref_mut();
@@ -152,6 +154,7 @@ impl Process {
         self.0.borrow().symbols.reverse_lookup(address)
     }
     pub fn reverse_lookup_fun(&self, address: &Value) -> Rc<dyn Func> {
+        timer!("Process::reverse_lookup_fun");
         self.0.borrow().functions
             .get(&address.as_u64())
             .unwrap_or_else(|| panic!("No such function {:?}", address)).clone()

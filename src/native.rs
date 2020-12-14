@@ -219,7 +219,6 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             let flags = flags.unwrap_u32();
             let fd = fd.unwrap_u32();
             let offset = offset.as_u64();
-            println!("mmap {:?}", addr);
             comp.process.value_from_address(addr)
         }),
         native_comp_new("mprotect", |comp, [addr, length, prot]| {

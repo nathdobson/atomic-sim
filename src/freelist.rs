@@ -8,8 +8,8 @@ use std::ops::Deref;
 
 struct FrcInner<T> {
     refcount: usize,
-    list: FreeList<T>,
     value: T,
+    list: FreeList<T>,
 }
 
 struct FreeListInner<T> {
@@ -72,8 +72,9 @@ impl<T> Drop for Frc<T> {
             if let Some(r2) = inner.refcount.checked_sub(1) {
                 inner.refcount = r2;
             } else {
-                inner.list.inner.borrow_mut().free.push(self.ptr);
+                let freelist = inner.list.inner.clone();
                 (*self.ptr.as_ptr()).assume_init_drop();
+                freelist.borrow_mut().free.push(self.ptr);
             }
         }
     }
@@ -81,8 +82,8 @@ impl<T> Drop for Frc<T> {
 
 impl<T> Drop for FreeListInner<T> {
     fn drop(&mut self) {
-        println!("Dropping FreeList");
         unsafe {
+            println!("Freelist size = {}", self.free.len());
             for x in self.free.iter() {
                 mem::drop(Box::from_raw(x.as_ptr()));
             }
@@ -103,13 +104,21 @@ impl<T> Deref for Frc<T> {
 #[test]
 fn test_freelist() {
     let freelist = FreeList::new();
-    let foo = freelist.alloc([10; 1024]);
-    let fooptr = &*foo as *const [i32];
-    let bar = freelist.alloc([20; 1024]);
-    let barptr = &*bar as *const [i32];
+    let foo = freelist.alloc(vec![10; 1024]);
+    let fooptr = foo.as_slice() as *const [i32];
+    let bar = freelist.alloc(vec![20; 1024]);
+    let barptr = bar.as_slice() as *const [i32];
     mem::drop(foo);
-    let baz = freelist.alloc([30; 1024]);
-    let bazptr = &*baz as *const [i32];
+    let baz = freelist.alloc(vec![30; 1024]);
+    let bazptr = baz.as_slice() as *const [i32];
     assert_eq!(fooptr, bazptr);
     assert_ne!(fooptr, barptr);
+}
+
+#[test]
+fn test_freelist_hanging() {
+    let freelist = FreeList::new();
+    let foo = freelist.alloc(vec![vec![1]]);
+    mem::drop(freelist);
+    mem::drop(foo);
 }

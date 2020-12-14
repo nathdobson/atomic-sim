@@ -11,6 +11,7 @@ use bitvec::order::Lsb0;
 use crate::class::Class;
 use bitvec::slice::BitSlice;
 use smallvec::SmallVec;
+use  crate::timer;
 
 //TODO
 //type Impl = Vec<u8>;
@@ -50,7 +51,10 @@ impl Value {
             b => todo!("{:?}", b),
         }
     }
-    pub fn as_u64(&self) -> u64 { self.as_u128() as u64 }
+    pub fn as_u64(&self) -> u64 {
+        timer!("Value::as_u64");
+        self.as_u128() as u64
+    }
     pub fn as_i64(&self) -> i64 { self.as_i128() as i64 }
     pub fn bits(&self) -> u64 {
         self.bits

@@ -17,6 +17,7 @@ use crate::compile::{CFunc, CBlockId, CInstr, CLocal, COperand, CTerm, CCompute}
 use vec_map::VecMap;
 use itertools::Itertools;
 use crate::operation::COperationName;
+use crate::timer;
 
 pub struct InterpFrame {
     origin: Option<CBlockId>,
@@ -50,9 +51,10 @@ impl InterpFrame {
         self.temps.insert(dest.0, thunk);
     }
     async fn decode_operand(&self, ctx: &InterpCtx, operand: &COperand) -> Thunk {
+        timer!("InterpFrame::decode_operand");
         match operand {
-            COperand::Constant(class, value) =>
-                ctx.flow.constant(value.clone()).await,
+            COperand::Constant(class, value) => value.clone(),
+            //ctx.flow.constant().await,
             COperand::Local(class, var) => {
                 self.temps.get(var.0).unwrap_or_else(|| panic!("No local {:?}", var)).clone()
             }

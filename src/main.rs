@@ -12,7 +12,7 @@
 #![feature(new_uninit)]
 #![feature(maybe_uninit_extra)]
 #![feature(maybe_uninit_ref)]
-#![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code)]
+#![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code, unused_macros)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
 use llvm_ir::Module;
@@ -26,6 +26,7 @@ use crate::process::Process;
 use std::panic::AssertUnwindSafe;
 use std::thread::spawn;
 use std::time::Instant;
+use crate::timer::dump_trace;
 
 //mod process;
 mod layout;
@@ -56,6 +57,8 @@ mod interp;
 mod future;
 mod rangemap;
 mod freelist;
+#[macro_use]
+mod timer;
 
 pub fn main() {
     // use crate::thread::Thread;
@@ -83,9 +86,9 @@ pub fn main() {
             .into_iter()
             .map(|t| t.join().unwrap())
             .collect::<Vec<_>>();
-    for (mi, module) in modules.iter().enumerate() {
-        println!("{:?}={:?}", ModuleId(mi), module.name);
-    }
+    // for (mi, module) in modules.iter().enumerate() {
+    //     println!("{:?}={:?}", ModuleId(mi), module.name);
+    // }
     let (process, process_scope) = Process::new();
     process.add_native();
     let mut compiler = Compiler::new(process.clone());
@@ -102,6 +105,7 @@ pub fn main() {
         println!("{:?}", Instant::now() - start);
     })));
     mem::drop(process_scope);
+    dump_trace();
     // let modules = &modules;
     // let native = native::builtins();
     // let ctx = Rc::new(Ctx::new(modules, native));

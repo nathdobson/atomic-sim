@@ -16,4 +16,4 @@ function build {
 build llvm-ir
 build llvm-bc
 cd ..
-RUST_BACKTRACE=1 cargo run --release
+RUST_BACKTRACE=1 cargo run "$@"

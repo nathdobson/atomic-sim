@@ -19,6 +19,8 @@ use std::ops::Deref;
 use std::task::{Poll, Context};
 use crate::future::pending_once;
 use crate::freelist::{Frc, FreeList};
+use smallvec::alloc::collections::VecDeque;
+use crate::timer;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -27,7 +29,7 @@ pub struct DataFlowInner {
     threadid: ThreadId,
     seq: usize,
     freelist: FreeList<ThunkInner>,
-    thunks: BTreeMap<usize, Thunk>,
+    thunks: VecDeque<Thunk>,
 }
 
 #[derive(Clone)]
@@ -75,6 +77,20 @@ pub struct ThunkInner {
 
 #[derive(Clone)]
 pub struct Thunk(Frc<ThunkInner>);
+
+impl Thunk {
+    pub fn constant(process: Process, value: Value) -> Self {
+        Thunk(FreeList::new().alloc(ThunkInner {
+            process: process,
+            threadid: ThreadId(0),
+            seq: 0,
+            deps: vec![],
+            address: None,
+            backtrace: Backtrace::empty(),
+            value: RefCell::new(ThunkState::Ready(value)),
+        }))
+    }
+}
 
 impl Thunk {
     pub fn try_get(&self) -> Option<&Value> {
@@ -138,7 +154,7 @@ impl DataFlow {
             threadid,
             seq: 0,
             freelist: FreeList::new(),
-            thunks: BTreeMap::new(),
+            thunks: VecDeque::new(),
         })))
     }
     pub async fn thunk(&self, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
@@ -157,10 +173,11 @@ impl DataFlow {
             backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
-        this.thunks.insert(seq, thunk.clone());
+        this.thunks.push_back(thunk.clone());
         thunk
     }
     pub async fn constant(&self, backtrace: Backtrace, v: Value) -> Thunk {
+        assert!(v.bits() > 0);
         self.thunk(backtrace, vec![], |_, _| v).await
     }
     pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
@@ -186,8 +203,8 @@ impl DataFlow {
     }
     pub fn step(&self) -> bool {
         let threadid = self.0.borrow().threadid;
-        let thunk = self.0.borrow_mut().thunks.pop_first();
-        if let Some((_, thunk)) = thunk {
+        let thunk = self.0.borrow_mut().thunks.pop_front();
+        if let Some(thunk) = thunk {
             let thunk2 = thunk.clone();
             let _d = defer(move || if thread::panicking() {
                 println!("Panic while forcing {:#?}", thunk2.full_debug());
