@@ -7,6 +7,7 @@ use std::fmt;
 use crate::data::{DataFlow, Thunk};
 use crate::process::{Process};
 use llvm_ir::DebugLoc;
+use smallvec::smallvec;
 
 #[derive(Clone)]
 pub struct FlowCtx {
@@ -42,7 +43,7 @@ impl FlowCtx {
     pub async fn alloc(&self, layout: Layout) -> Value {
         let threadid = self.data.threadid();
         let process = self.process.clone();
-        self.data.thunk(self.backtrace.clone(), vec![], move |comp, _| {
+        self.data.thunk(self.backtrace.clone(), smallvec![], move |comp, _| {
             process.alloc(threadid, layout)
         }).await.await
     }

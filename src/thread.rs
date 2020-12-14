@@ -23,6 +23,7 @@ use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use crate::process::{Process};
 use crate::future::{LocalBoxFuture, noop_waker};
+use crate::async_timer;
 
 pub struct ThreadInner {
     threadid: ThreadId,
@@ -44,14 +45,15 @@ impl Thread {
         let params = params.to_vec();
         let control: RefCell<Option<Pin<Box<dyn Future<Output=()>>>>> = RefCell::new(Some(Box::pin({
             let data = data.clone();
-            async move {
+            let inner = async move {
                 let mut deps = vec![];
                 for value in params {
                     let value = value.clone();
                     deps.push(data.constant(Backtrace::empty(), value).await);
                 }
                 main.call_imp(&FlowCtx::new(process.clone(), data, Backtrace::empty()), &deps).await;
-            }
+            };
+            async_timer!("Thread::new::control", inner)
         })));
         Thread(Rc::new(ThreadInner { threadid, control, data }))
     }

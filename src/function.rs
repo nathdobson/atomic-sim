@@ -58,7 +58,7 @@ impl Func for NativeComp {
 
     fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx, args: &'flow [Thunk]) -> LocalBoxFuture<'flow, Thunk> {
         let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(flow.backtrace().clone(), args.to_vec(),
+        Box::pin(flow.data().thunk(flow.backtrace().clone(), args.iter().cloned().collect(),
                                    move |comp: &ComputeCtx, args| {
                                        imp(comp, args)
                                    }))

@@ -1,7 +1,7 @@
 use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand, DebugLoc, Type, HasDebugLoc, TypeRef};
 use std::collections::HashMap;
 use crate::function::{Func};
-use crate::data::{Thunk, ComputeCtx};
+use crate::data::{Thunk, ComputeCtx, ThunkDeps};
 use std::rc::Rc;
 use llvm_ir::instruction::{RMWBinOp, Sub, Mul, UDiv, SDiv, URem, SRem, Add, And, Or, Shl, LShr, AShr, ICmp, Xor, SExt, ZExt, Trunc, PtrToInt, IntToPtr, BitCast, InsertValue, AtomicRMW, Select, ExtractValue, CmpXchg, Fence, InlineAssembly, ExtractElement, InsertElement, ShuffleVector};
 use either::Either;
@@ -18,6 +18,9 @@ use vec_map::VecMap;
 use itertools::Itertools;
 use crate::operation::COperationName;
 use crate::timer;
+use smallvec::SmallVec;
+use smallvec::smallvec;
+use crate::async_timer;
 
 pub struct InterpFrame {
     origin: Option<CBlockId>,
@@ -51,22 +54,29 @@ impl InterpFrame {
         self.temps.insert(dest.0, thunk);
     }
     async fn decode_operand(&self, ctx: &InterpCtx, operand: &COperand) -> Thunk {
-        timer!("InterpFrame::decode_operand");
-        match operand {
-            COperand::Constant(class, value) => value.clone(),
-            //ctx.flow.constant().await,
-            COperand::Local(class, var) => {
-                self.temps.get(var.0).unwrap_or_else(|| panic!("No local {:?}", var)).clone()
+        let inner = async {
+            match operand {
+                COperand::Constant(class, value) => value.clone(),
+                //ctx.flow.constant().await,
+                COperand::Local(class, var) => {
+                    self.temps.get(var.0).unwrap_or_else(|| panic!("No local {:?}", var)).clone()
+                }
+                COperand::Inline => todo!(),
             }
-            COperand::Inline => todo!(),
-        }
+        };
+        //async_timer!("InterpFrame::decode_operand", inner).await
+        inner.await
     }
-    async fn decode_operands(&self, ctx: &InterpCtx, operands: impl Iterator<Item=&COperand>) -> Vec<Thunk> {
-        let mut result = Vec::with_capacity(operands.size_hint().0);
-        for operand in operands {
-            result.push(self.decode_operand(ctx, operand).await);
-        }
-        result
+    async fn decode_operands(&self, ctx: &InterpCtx, operands: impl Iterator<Item=&COperand>) -> ThunkDeps {
+        let inner = async {
+            let mut result = SmallVec::with_capacity(operands.size_hint().0);
+            for operand in operands {
+                result.push(self.decode_operand(ctx, operand).await);
+            }
+            result
+        };
+        //async_timer!("InterpFrame::decode_operands", inner).await
+        inner.await
     }
     pub async fn decode(&mut self, flow: &FlowCtx, fun: &CFunc) -> Thunk {
         let mut block = &fun.blocks[0];
@@ -214,7 +224,7 @@ impl InterpFrame {
             CInstr::Alloca(alloca) => {
                 let result = self.thunk(
                     ctx,
-                    vec![self.decode_operand(ctx, &alloca.count).await],
+                    smallvec![self.decode_operand(ctx, &alloca.count).await],
                     {
                         let alloca = alloca.clone();
                         move |comp, args| {
@@ -247,7 +257,7 @@ impl InterpFrame {
                 let address = self.decode_operand(ctx, &cmpxchg.address).await;
                 let expected = self.decode_operand(ctx, &cmpxchg.expected).await;
                 let replacement = self.decode_operand(ctx, &cmpxchg.replacement).await;
-                let deps = vec![address, expected, replacement];
+                let deps = smallvec![address, expected, replacement];
                 let layout = cmpxchg.expected.class().layout();
                 let types = ctx.flow.process().types();
                 let class = types.struc(vec![cmpxchg.expected.class().clone(), types.bool()], false);
@@ -267,7 +277,7 @@ impl InterpFrame {
             CInstr::AtomicRMW(atomicrmw) => {
                 let address = self.decode_operand(ctx, &atomicrmw.address).await;
                 let value = self.decode_operand(ctx, &atomicrmw.value).await;
-                let deps = vec![address, value];
+                let deps = smallvec![address, value];
                 let layout = atomicrmw.value.class().layout();
                 let result = self.thunk(ctx, deps, {
                     let atomicrmw = atomicrmw.clone();
@@ -321,7 +331,7 @@ impl InterpFrame {
     async fn thunk(
         &mut self,
         ctx: &InterpCtx,
-        deps: Vec<Thunk>,
+        deps: ThunkDeps,
         compute: impl FnOnce(&ComputeCtx, &[&Value]) -> Value + 'static) -> Thunk {
         ctx.flow.data().thunk(ctx.flow.backtrace().clone(),
                               deps, compute).await

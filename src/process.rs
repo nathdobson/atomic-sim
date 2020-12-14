@@ -154,7 +154,6 @@ impl Process {
         self.0.borrow().symbols.reverse_lookup(address)
     }
     pub fn reverse_lookup_fun(&self, address: &Value) -> Rc<dyn Func> {
-        timer!("Process::reverse_lookup_fun");
         self.0.borrow().functions
             .get(&address.as_u64())
             .unwrap_or_else(|| panic!("No such function {:?}", address)).clone()

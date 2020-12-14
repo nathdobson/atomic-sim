@@ -5,6 +5,8 @@ use std::iter;
 use crate::layout::{Layout, Packing};
 use crate::class::{Class, ClassKind};
 use bitvec::vec::BitVec;
+use crate::timer;
+use smallvec::SmallVec;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum CIntPredicate {
@@ -129,6 +131,7 @@ impl COperation {
             | UIToFP(_)
             | SIToFP(_)
             => {
+                timer!("COperation::call_operation::simple");
                 match &self.output.kind() {
                     ClassKind::IntegerClass(_)
                     | ClassKind::PointerClass(_)
@@ -140,8 +143,8 @@ impl COperation {
                                 self.input.iter()
                                     .zip(inputs.iter())
                                     .map(|(c, s)| { s.extract(c, i) })
-                                    .collect::<Vec<_>>();
-                            let inputs = inputs.iter().collect::<Vec<_>>();
+                                    .collect::<SmallVec<[_; 16]>>();
+                            let inputs = inputs.iter().collect::<SmallVec<[_; 16]>>();
                             let scalar = self.call_scalar(&inputs);
                             vector.insert(&self.output, i, &scalar)
                         }
@@ -227,7 +230,7 @@ impl COperation {
             | FNeg
             | ICmp(_) =>
                 self.call_scalar_binop(inputs[0], inputs[1]),
-            | SExt(output) => self.call_scalar_sext(inputs[0],output.layout().bits()),
+            | SExt(output) => self.call_scalar_sext(inputs[0], output.layout().bits()),
             | ZExt(output) => inputs[0].ucast(output.layout()),
             | Trunc(output) => inputs[0].ucast(output.layout()),
             | FPTrunc(_) => todo!(),
@@ -282,7 +285,7 @@ impl COperation {
         }
     }
 
-    pub fn call_scalar_sext(&self, v1: &Value,bits:u64) -> Value {
+    pub fn call_scalar_sext(&self, v1: &Value, bits: u64) -> Value {
         match (v1.bits(), bits) {
             (x, y) if x == y => v1.clone(),
             (8, 16) => Value::from(v1.unwrap_i8() as i16),

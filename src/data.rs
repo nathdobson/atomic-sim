@@ -21,6 +21,8 @@ use crate::future::pending_once;
 use crate::freelist::{Frc, FreeList};
 use smallvec::alloc::collections::VecDeque;
 use crate::timer;
+use smallvec::SmallVec;
+use smallvec::smallvec;
 
 const PIPELINE_SIZE: usize = 1;
 
@@ -69,11 +71,13 @@ pub struct ThunkInner {
     process: Process,
     threadid: ThreadId,
     seq: usize,
-    deps: Vec<Thunk>,
+    deps: ThunkDeps,
     address: Option<Thunk>,
     backtrace: Backtrace,
     value: RefCell<ThunkState>,
 }
+
+pub type ThunkDeps = SmallVec<[Thunk; 4]>;
 
 #[derive(Clone)]
 pub struct Thunk(Frc<ThunkInner>);
@@ -84,7 +88,7 @@ impl Thunk {
             process: process,
             threadid: ThreadId(0),
             seq: 0,
-            deps: vec![],
+            deps: smallvec![],
             address: None,
             backtrace: Backtrace::empty(),
             value: RefCell::new(ThunkState::Ready(value)),
@@ -157,7 +161,7 @@ impl DataFlow {
             thunks: VecDeque::new(),
         })))
     }
-    pub async fn thunk(&self, backtrace: Backtrace, deps: Vec<Thunk>, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
+    pub async fn thunk(&self, backtrace: Backtrace, deps: ThunkDeps, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
         while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
             pending_once().await;
         }
@@ -178,12 +182,12 @@ impl DataFlow {
     }
     pub async fn constant(&self, backtrace: Backtrace, v: Value) -> Thunk {
         assert!(v.bits() > 0);
-        self.thunk(backtrace, vec![], |_, _| v).await
+        self.thunk(backtrace, smallvec![], |_, _| v).await
     }
     pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
         let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk(backtrace, vec![address, value], move |comp, args| {
+        self.thunk(backtrace, smallvec![address, value], move |comp, args| {
             process.store(threadid, args[0], args[1], atomicity);
             Value::from(())
         }).await
@@ -191,7 +195,7 @@ impl DataFlow {
     pub async fn load<'a>(&'a self, backtrace: Backtrace, address: Thunk, layout: Layout, atomicity: Option<Atomicity>) -> Thunk {
         let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk(backtrace, vec![address], move |comp, args| {
+        self.thunk(backtrace, smallvec![address], move |comp, args| {
             process.load(threadid, args[0], layout, atomicity)
         }).await
     }
@@ -202,6 +206,7 @@ impl DataFlow {
         self.0.borrow().seq
     }
     pub fn step(&self) -> bool {
+        timer!("DataFlow::step");
         let threadid = self.0.borrow().threadid;
         let thunk = self.0.borrow_mut().thunks.pop_front();
         if let Some(thunk) = thunk {

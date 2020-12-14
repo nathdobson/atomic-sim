@@ -11,7 +11,7 @@ use bitvec::order::Lsb0;
 use crate::class::Class;
 use bitvec::slice::BitSlice;
 use smallvec::SmallVec;
-use  crate::timer;
+use crate::timer;
 
 //TODO
 //type Impl = Vec<u8>;
@@ -38,7 +38,11 @@ impl Value {
         if self.imp.is_empty() {
             0
         } else {
-            self[0..128.min(self.bits)].load_le()
+            let mut buf = [0u8; 16];
+            let len = 16.min(self.imp.len());
+            buf[0..len].copy_from_slice(&self.imp[..len]);
+            //self[0..128.min(self.bits)].load_le()
+            u128::from_le_bytes(buf)
         }
     }
     pub fn as_i128(&self) -> i128 {
@@ -52,7 +56,6 @@ impl Value {
         }
     }
     pub fn as_u64(&self) -> u64 {
-        timer!("Value::as_u64");
         self.as_u128() as u64
     }
     pub fn as_i64(&self) -> i64 { self.as_i128() as i64 }
@@ -120,7 +123,11 @@ impl Value {
         self.extract_bits(element.bit_offset, element.class.layout().bits())
     }
     pub fn extract_bits(&self, offset: i64, len: u64) -> Value {
-        Value::from_bits(&self[offset as u64..offset as u64 + len as u64])
+        if offset % 8 == 0 && len % 8 == 0 {
+            Value::from_bytes_exact(&self.imp[(offset / 8) as usize..(offset / 8 + len as i64 / 8) as usize])
+        } else {
+            Value::from_bits(&self[offset as u64..offset as u64 + len as u64])
+        }
     }
     pub fn insert_bits(&mut self, offset: i64, value: &Value) {
         let left = &mut self[offset as u64..offset as u64 + value.bits()];

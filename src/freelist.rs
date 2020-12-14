@@ -83,7 +83,6 @@ impl<T> Drop for Frc<T> {
 impl<T> Drop for FreeListInner<T> {
     fn drop(&mut self) {
         unsafe {
-            println!("Freelist size = {}", self.free.len());
             for x in self.free.iter() {
                 mem::drop(Box::from_raw(x.as_ptr()));
             }

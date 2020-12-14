@@ -13,7 +13,7 @@ fn main() {
     // map2.insert(2, "b");
     // println!("XXXX{:?}{:?}", map, map2);
     let mut map = HashMap::new();
-    for i in 0..10000 {
+    for i in 0..30000 {
         map.insert(i, i);
     }
     println!("{:?}", map.get(&42));
