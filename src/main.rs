@@ -12,8 +12,12 @@
 #![feature(new_uninit)]
 #![feature(maybe_uninit_extra)]
 #![feature(maybe_uninit_ref)]
+#![feature(thread_local)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code, unused_macros)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
+
+#[global_allocator]
+static GLOBAL: crate::allocator::Allocator = crate::allocator::Allocator;
 
 use llvm_ir::Module;
 use std::{fs, panic, mem};
@@ -60,6 +64,7 @@ mod freelist;
 #[macro_use]
 mod timer;
 mod recursor;
+mod allocator;
 
 pub fn main() {
     // use crate::thread::Thread;

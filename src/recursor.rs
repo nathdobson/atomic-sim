@@ -104,10 +104,8 @@ impl Future for Recursor {
     }
 }
 
-
 #[test]
 fn test_recursor() {
-
     fn fibonacci_rec<'a>(rec: &'a Recursor, n: usize) -> LocalBoxFuture<'a, usize> {
         rec.spawn(async move {
             if n == 0 {

@@ -4,17 +4,33 @@ use std::thread;
 use std::fmt::Debug;
 use std::collections::{HashMap, BTreeSet, BTreeMap};
 use std::hash::BuildHasher;
+use core::mem;
 
+
+fn fib(x: usize) -> usize {
+    if x == 0 {
+        0
+    } else if x == 1 {
+        1
+    } else {
+        fib(x - 1) + fib(x - 2)
+    }
+}
+
+#[inline(never)]
+fn factorial(x: usize) -> usize {
+    if x == 0 {
+        0
+    } else {
+        x * factorial(x - 1)
+    }
+}
 
 fn main() {
     // let mut map = HashMap::new();
-    // map.insert(1, "a");
-    // let mut map2 = BTreeMap::new();
-    // map2.insert(2, "b");
-    // println!("XXXX{:?}{:?}", map, map2);
-    let mut map = HashMap::new();
-    for i in 0..30000 {
-        map.insert(i, i);
-    }
-    println!("{:?}", map.get(&42));
+    // for i in 0..1000 {
+    //     map.insert(i, i);
+    // }
+    //println!("{:?}", map.get(&42));
+    println!("{:?}", factorial(50000));
 }

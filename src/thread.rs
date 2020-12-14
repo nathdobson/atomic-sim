@@ -24,6 +24,7 @@ use crate::flow::FlowCtx;
 use crate::process::{Process};
 use crate::future::{LocalBoxFuture, noop_waker};
 use crate::async_timer;
+use crate::recursor::Recursor;
 
 pub struct ThreadInner {
     threadid: ThreadId,
@@ -51,7 +52,12 @@ impl Thread {
                     let value = value.clone();
                     deps.push(data.constant(Backtrace::empty(), value).await);
                 }
-                main.call_imp(&FlowCtx::new(process.clone(), data, Backtrace::empty()), &deps).await;
+                let recursor = Recursor::new();
+                let flow = FlowCtx::new(process.clone(), data, Backtrace::empty(), recursor.clone());
+                let main = main.call_imp(&flow, &deps);
+                let main = recursor.spawn(main);
+                recursor.await;
+                main.await;
             };
             async_timer!("Thread::new::control", inner)
         })));

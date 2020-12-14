@@ -3,5 +3,6 @@ Cargo.lock
 /tests/target
 /tests/target-llvm-bc
 /tests/target-llvm-ir
+/tests/target-bin
 .gradle
 .idea

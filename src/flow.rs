@@ -8,19 +8,23 @@ use crate::data::{DataFlow, Thunk};
 use crate::process::{Process};
 use llvm_ir::DebugLoc;
 use smallvec::smallvec;
+use crate::recursor::Recursor;
 
 #[derive(Clone)]
 pub struct FlowCtx {
     process: Process,
     data: DataFlow,
     backtrace: Backtrace,
+    recursor: Recursor,
 }
 
 impl FlowCtx {
     pub fn new(process: Process,
                data: DataFlow,
-               backtrace: Backtrace) -> Self {
-        FlowCtx { process, data, backtrace }
+               backtrace: Backtrace,
+               recursor: Recursor,
+    ) -> Self {
+        FlowCtx { process, data, backtrace, recursor }
     }
 
     pub async fn invoke(&self, fun: &Value, fargs: &[&Value]) -> Value {
@@ -37,6 +41,7 @@ impl FlowCtx {
             process: self.process.clone(),
             data: self.data.clone(),
             backtrace: self.backtrace.prepend(frame),
+            recursor: self.recursor.clone(),
         }
     }
 
@@ -98,6 +103,7 @@ impl FlowCtx {
     pub fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
+    pub fn recursor(&self) -> &Recursor { &self.recursor }
 }
 
 

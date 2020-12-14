@@ -40,6 +40,10 @@ enum DecodeResult {
 
 impl InterpFrame {
     pub async fn call(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Thunk {
+        flow.recursor().spawn(Self::call_impl(flow,fun,params)).await
+        //Self::call_impl(flow, fun, params).await
+    }
+    pub async fn call_impl(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Thunk {
         let mut temps = VecMap::with_capacity(fun.locals.len());
         for (arg, param) in fun.args.iter().zip_eq(params.into_iter()) {
             temps.insert(arg.0, param);
