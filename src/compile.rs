@@ -24,6 +24,7 @@ use crate::data::{Thunk, DataFlow, ThunkInner, ThunkState};
 use crate::backtrace::BacktraceFrame;
 use crate::freelist::FreeList;
 use std::cell::RefCell;
+use crate::lazy::Lazy;
 
 #[derive(Debug)]
 pub struct CFunc {
@@ -1037,13 +1038,16 @@ impl Compiler {
             }
         }
         for (module, loc, func) in func_inits {
-            self.process.add_func(&loc, Rc::new(FuncCompiler {
+            let module_compiler = module.clone();
+            let type_map = module.type_map.clone();
+            let func = func.clone();
+            self.process.add_func(&loc.clone(), Rc::new(Lazy::new(move || FuncCompiler {
                 locals: HashMap::new(),
                 local_names: vec![],
                 block_ids: HashMap::new(),
-                type_map: module.type_map.clone(),
-                module_compiler: module.clone(),
-            }.compile_func(&loc, func)));
+                type_map,
+                module_compiler,
+            }.compile_func(&loc, &func))));
         }
         for (module, loc, layout, global) in global_inits {
             let value = if let Some(init) = &global.initializer {

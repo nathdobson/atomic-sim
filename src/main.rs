@@ -108,7 +108,7 @@ pub fn main() {
                 break;
             }
         }
-        println!("{:?}", Instant::now() - start);
+        println!("Step time: {:?}", Instant::now() - start);
     })));
     mem::drop(process_scope);
     dump_trace();

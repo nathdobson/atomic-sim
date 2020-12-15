@@ -14,6 +14,7 @@ use llvm_ir::DebugLoc;
 use crate::compile::CFunc;
 use crate::interp::InterpFrame;
 use crate::future::{LocalBoxFuture, FutureExt};
+use crate::lazy::Lazy;
 
 pub trait Func: Debug {
     fn name(&self) -> &str;
@@ -47,6 +48,20 @@ impl Func for CFunc {
 
     fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
         Box::pin(InterpFrame::call(flow, self, args.to_vec()))
+    }
+}
+
+impl<F: Func> Func for Lazy<F> {
+    fn name(&self) -> &str {
+        self.force().unwrap().name()
+    }
+
+    fn debugloc(&self) -> Option<&DebugLoc> {
+        self.force().unwrap().debugloc()
+    }
+
+    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
+        self.force().unwrap().call_imp(flow, args)
     }
 }
 

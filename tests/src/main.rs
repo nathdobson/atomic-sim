@@ -27,10 +27,9 @@ fn factorial(x: usize) -> usize {
 }
 
 fn main() {
-    // let mut map = HashMap::new();
-    // for i in 0..1000 {
-    //     map.insert(i, i);
-    // }
-    //println!("{:?}", map.get(&42));
-    println!("{:?}", factorial(50000));
+    let mut map = HashMap::new();
+    for i in 0..1000 {
+        map.insert(i, i);
+    }
+    println!("{:?}", map.get(&42));
 }
