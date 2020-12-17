@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
-use crate::future::{LocalBoxFuture, FutureExt};
+use crate::util::future::{LocalBoxFuture, FutureExt};
 use std::future::Future;
 use std::task::{Context, Poll};
 use std::pin::Pin;

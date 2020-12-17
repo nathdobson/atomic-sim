@@ -8,13 +8,11 @@ use llvm_ir::{TypeRef, IntPredicate};
 use bitvec::vec::BitVec;
 use bitvec::field::BitField;
 use bitvec::order::Lsb0;
-use crate::class::Class;
+use crate::compile::class::Class;
 use bitvec::slice::BitSlice;
 use smallvec::SmallVec;
 use crate::timer;
 
-//TODO
-//type Impl = Vec<u8>;
 type Impl = SmallVec<[u8; 16]>;
 
 pub type ValueSlice = BitSlice<Lsb0, u8>;

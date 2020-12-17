@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use llvm_ir::{Instruction, Type, Operand, Constant, IntPredicate, Name, Terminator, constant, TypeRef};
-use llvm_ir::instruction::{Atomicity, InsertValue, SExt, ZExt, AtomicRMW, RMWBinOp, Select, Trunc, PtrToInt, ExtractValue, IntToPtr, CmpXchg};
+use llvm_ir::instruction::{Atomicity, InsertValue, SExt, ZExt, AtomicRMW, RMWBinOp, Select, Trunc, PtrToInt, ExtractValue, IntToPtr, CmpXchg, MemoryOrdering};
 use std::ops::{Range, Deref, DerefMut};
 use crate::layout::{Layout, align_to, AggrLayout, Packing};
 use llvm_ir::types::NamedStructDef;
@@ -16,19 +16,25 @@ use std::borrow::{Cow};
 use crate::value::{Value, add_u64_i64};
 use std::convert::TryInto;
 use std::panic::UnwindSafe;
-use crate::symbols::{Symbol, SymbolTable, ModuleId};
+use crate::symbols::{Symbol, SymbolTable};
 use std::time::{Instant, Duration};
 use crate::data::Thunk;
 use std::cell::RefCell;
 use crate::function::Func;
 use crate::memory::Memory;
 use crate::thread::{ThreadId, Thread};
-use crate::class::TypeMap;
+use crate::compile::class::{TypeMap, Class};
 use crate::native;
 use crate::timer;
+use crate::symbols::SymbolDef;
+use llvm_ir::module::ThreadLocalMode;
+use crate::symbols::ThreadLocalKey;
+use crate::compile::module::ModuleId;
+use rand::seq::SliceRandom;
 
 pub struct ProcessInner {
     functions: HashMap<u64, Rc<dyn Func>>,
+    thread_local_inits: HashMap<ThreadLocalKey, (Layout, Value)>,
     ptr_bits: u64,
     page_size: u64,
     rng: XorShiftRng,
@@ -49,6 +55,7 @@ impl Process {
         let ptr_bits = 64;
         let result = Process(Rc::new(RefCell::new(ProcessInner {
             functions: HashMap::new(),
+            thread_local_inits: HashMap::new(),
             ptr_bits,
             page_size: 4096,
             threads: BTreeMap::new(),
@@ -66,33 +73,41 @@ impl Process {
     pub fn ptr_bits(&self) -> u64 {
         self.0.borrow().ptr_bits
     }
-    pub fn add_thread(&self, main: Symbol) {
+    pub fn add_main(&self) {
+        let fun = self.lookup_symbol(&Symbol::External("main".to_string())).global().unwrap();
+        let params = &[Value::new(32, 0),
+            Value::new(self.ptr_bits(), 0)];
+        self.add_thread(&self.value_from_address(fun), params);
+    }
+    pub fn add_thread(&self, fun: &Value, params: &[Value]) -> ThreadId {
         let threadid = {
             let mut this = self.0.borrow_mut();
             let threadid = ThreadId(this.next_threadid);
             this.next_threadid += 1;
             threadid
         };
-        let thread = Thread::new(self.clone(), threadid, main,
-                                 &[Value::new(32, 0),
-                                     Value::new(self.ptr_bits(), 0)]);
-        self.0.borrow_mut().threads.insert(threadid,
-                                           thread);
+        let thread = Thread::new(self.clone(), threadid, fun, params);
+        self.0.borrow_mut().threads.insert(threadid, thread);
+        threadid
     }
     pub fn step(&self) -> bool {
         timer!("Process::step");
-        let (threadid, thread) = {
+        let (threadid, thread, count) = {
             let mut this = self.0.borrow_mut();
             let this = this.deref_mut();
             if this.threads.is_empty() {
                 return false;
             }
             let index = this.rng.gen_range(0, this.threads.len());
-            let thread = this.threads.iter_mut().nth(index).unwrap().1.clone();
-            (ThreadId(index), thread)
+            let count = *[1, 10, 100, 1000].choose(&mut this.rng).unwrap();
+            let (threadid, thread) = this.threads.iter_mut().nth(index).unwrap();
+            (*threadid, thread.clone(), count)
         };
-        if !thread.step() {
-            self.0.borrow_mut().threads.remove(&threadid);
+        for i in 0..count {
+            if !thread.step() {
+                self.0.borrow_mut().threads.remove(&threadid);
+                break;
+            }
         }
         true
     }
@@ -102,24 +117,11 @@ impl Process {
     pub fn alloc(&self, tid: ThreadId, layout: Layout) -> Value {
         self.0.borrow_mut().memory.alloc(layout)
     }
-    pub fn realloc(&self, tid: ThreadId, old: &Value, old_layout: Layout, new_layout: Layout) -> Value {
-        let new = self.alloc(tid, new_layout);
-        self.memcpy(tid, &new, old, new_layout.bytes().min(old_layout.bytes()));
-        self.free(tid, old);
-
-        new
+    pub fn store_impl(&self, threadid: ThreadId, ptr: &Value, value: &Value, atomicity: Option<MemoryOrdering>) {
+        self.0.borrow_mut().memory.store_impl(threadid, ptr, value, atomicity);
     }
-    pub fn store(&self, threadid: ThreadId, ptr: &Value, value: &Value, atomicity: Option<Atomicity>) {
-        self.0.borrow_mut().memory.store(threadid, ptr, value, atomicity);
-    }
-    pub fn load(&self, threadid: ThreadId, ptr: &Value, layout: Layout, atomicity: Option<Atomicity>) -> Value {
-        self.0.borrow_mut().memory.load(ptr, layout, atomicity)
-    }
-    pub fn memcpy(&self, threadid: ThreadId, dst: &Value, src: &Value, len: u64) {
-        if len > 0 {
-            let value = self.load(threadid, &src, Layout::from_bytes(len, 1), None);
-            self.0.borrow_mut().memory.store(threadid, &dst, &value, None);
-        }
+    pub fn load_impl(&self, threadid: ThreadId, ptr: &Value, layout: Layout, atomicity: Option<MemoryOrdering>) -> Value {
+        self.0.borrow_mut().memory.load_impl(ptr, layout, atomicity)
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
         let this = self.0.borrow_mut();
@@ -153,24 +155,25 @@ impl Process {
     pub fn reverse_lookup(&self, address: &Value) -> Symbol {
         self.0.borrow().symbols.reverse_lookup(address)
     }
-    pub fn reverse_lookup_fun(&self, address: &Value) -> Rc<dyn Func> {
-        self.0.borrow().functions
+    pub fn reverse_lookup_fun(&self, address: &Value) -> Result<Rc<dyn Func>, String> {
+        Ok(self.0.borrow().functions
             .get(&address.as_u64())
-            .unwrap_or_else(|| panic!("No such function {:?}", address)).clone()
+            .ok_or_else(|| format!("No such function {:?}", address))?
+            .clone())
     }
     pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol> {
         self.0.borrow().symbols.try_reverse_lookup(address)
     }
-    pub fn lookup(&self, moduleid: Option<ModuleId>, name: &str) -> Value {
+    pub fn lookup(&self, moduleid: Option<ModuleId>, name: &str) -> SymbolDef {
         self.0.borrow().symbols.lookup(moduleid, name)
     }
-    pub fn lookup_symbol(&self, sym: &Symbol) -> Value {
+    pub fn lookup_symbol(&self, sym: &Symbol) -> SymbolDef {
         self.0.borrow().symbols.lookup_symbol(sym)
     }
-    pub fn add_symbol(&self, symbol: Symbol, layout: Layout) -> Value {
+    pub fn add_symbol(&self, symbol: Symbol, mode: ThreadLocalMode, layout: Layout) -> SymbolDef {
         let mut this = self.0.borrow_mut();
         let this = this.deref_mut();
-        this.symbols.add_symbol(&mut this.memory, symbol, layout)
+        this.symbols.add_symbol(&mut this.memory, symbol, mode, layout)
     }
     pub fn add_alias(&self, symbol: Symbol, value: Value) {
         let mut this = self.0.borrow_mut();
@@ -180,11 +183,25 @@ impl Process {
     pub fn add_func(&self, address: &Value, f: Rc<dyn Func>) {
         assert!(self.0.borrow_mut().functions.insert(address.as_u64(), f).is_none());
     }
+    pub fn add_thread_local_init(&self, key: ThreadLocalKey, layout: Layout, value: Value) {
+        assert!(self.0.borrow_mut().thread_local_inits.insert(key, (layout, value)).is_none());
+    }
+    pub fn thread_local_init(&self, key: ThreadLocalKey) -> (Layout, Value) {
+        self.0.borrow().thread_local_inits.get(&key).unwrap().clone()
+    }
     pub fn add_native(&self) {
         for b in native::builtins() {
-            let address = self.add_symbol(Symbol::External(b.name().to_string()), Layout::of_func());
-            self.0.borrow_mut().functions.insert(address.as_u64(), b);
+            let address =
+                self.add_symbol(
+                    Symbol::External(b.name().to_string()),
+                    ThreadLocalMode::NotThreadLocal,
+                    Layout::of_func());
+            self.0.borrow_mut().functions.insert(address.global().unwrap(), b);
         }
+    }
+
+    pub fn thread(&self, id: ThreadId) -> Option<Thread> {
+        self.0.borrow().threads.get(&id).cloned()
     }
 }
 

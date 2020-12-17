@@ -115,6 +115,5 @@ mod disabled {
     }
 
     pub fn dump_trace() {
-        println!("Timer disabled");
     }
 }

@@ -4,7 +4,7 @@ use std::{fmt, mem, iter, thread};
 use std::collections::{HashMap, BTreeMap, HashSet, BTreeSet};
 use std::rc::Rc;
 use std::cell::{RefCell, Ref};
-use llvm_ir::instruction::Atomicity;
+use llvm_ir::instruction::{Atomicity, MemoryOrdering};
 use crate::layout::Layout;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,14 +17,15 @@ use crate::process::Process;
 use crate::thread::{Thread, ThreadId};
 use std::ops::Deref;
 use std::task::{Poll, Context};
-use crate::future::pending_once;
-use crate::freelist::{Frc, FreeList};
+use crate::util::future::pending_once;
 use smallvec::alloc::collections::VecDeque;
 use crate::timer;
 use smallvec::SmallVec;
 use smallvec::smallvec;
+use crate::util::rangemap::RangeMap;
+use crate::util::freelist::{FreeList, Frc};
 
-const PIPELINE_SIZE: usize = 1;
+const PIPELINE_SIZE: usize = 1000;
 
 pub struct DataFlowInner {
     process: Process,
@@ -60,9 +61,6 @@ pub struct ComputeCtx {
 
 pub enum ThunkState {
     Pending(Box<dyn FnOnce(&ComputeCtx, &[&Value]) -> Value>),
-    Load { layout: Layout },
-    Store,
-    Modify(Box<dyn FnOnce(&ComputeCtx, &Value) -> (Value, Value)>),
     Ready(Value),
     Sandbag,
 }
@@ -72,7 +70,8 @@ pub struct ThunkInner {
     threadid: ThreadId,
     seq: usize,
     deps: ThunkDeps,
-    address: Option<Thunk>,
+    address: Option<(Thunk, Layout)>,
+    ordering: Option<MemoryOrdering>,
     backtrace: Backtrace,
     value: RefCell<ThunkState>,
 }
@@ -90,6 +89,7 @@ impl Thunk {
             seq: 0,
             deps: smallvec![],
             address: None,
+            ordering: None,
             backtrace: Backtrace::empty(),
             value: RefCell::new(ThunkState::Ready(value)),
         }))
@@ -103,7 +103,6 @@ impl Thunk {
             ThunkState::Pending(_) => return None,
             ThunkState::Ready(_) => {}
             ThunkState::Sandbag => unreachable!(),
-            _ => todo!()
         }
         let r = Ref::leak(r);
         match r {
@@ -161,7 +160,13 @@ impl DataFlow {
             thunks: VecDeque::new(),
         })))
     }
-    pub async fn thunk(&self, backtrace: Backtrace, deps: ThunkDeps, compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
+    pub async fn thunk_impl(
+        &self,
+        backtrace: Backtrace,
+        address: Option<(Thunk, Layout)>,
+        ordering: Option<MemoryOrdering>,
+        deps: ThunkDeps,
+        compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
         while self.0.borrow().thunks.len() >= PIPELINE_SIZE {
             pending_once().await;
         }
@@ -173,31 +178,50 @@ impl DataFlow {
             threadid: this.threadid,
             seq,
             deps,
-            address: None,
+            address,
+            ordering,
             backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
         }));
         this.thunks.push_back(thunk.clone());
         thunk
     }
+    pub async fn thunk(
+        &self,
+        backtrace: Backtrace,
+        deps: ThunkDeps,
+        compute: impl 'static + FnOnce(&ComputeCtx, &[&Value]) -> Value) -> Thunk {
+        self.thunk_impl(backtrace, None, None, deps, compute).await
+    }
     pub async fn constant(&self, backtrace: Backtrace, v: Value) -> Thunk {
-        assert!(v.bits() > 0);
         self.thunk(backtrace, smallvec![], |_, _| v).await
     }
-    pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
+    pub async fn store<'a>(&'a self, backtrace: Backtrace, address: Thunk, layout: Layout, value: Thunk, atomicity: Option<Atomicity>) -> Thunk {
         let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk(backtrace, smallvec![address, value], move |comp, args| {
-            process.store(threadid, args[0], args[1], atomicity);
-            Value::from(())
-        }).await
+        let ordering = atomicity.clone().map(|x| x.mem_ordering);
+        self.thunk_impl(
+            backtrace,
+            Some((address.clone(), layout)),
+            atomicity.clone().map(|x| x.mem_ordering),
+            smallvec![address, value],
+            move |comp, args| {
+                process.store_impl(threadid, args[0], args[1], ordering);
+                Value::from(())
+            }).await
     }
     pub async fn load<'a>(&'a self, backtrace: Backtrace, address: Thunk, layout: Layout, atomicity: Option<Atomicity>) -> Thunk {
         let process = self.0.borrow().process.clone();
         let threadid = self.0.borrow().threadid;
-        self.thunk(backtrace, smallvec![address], move |comp, args| {
-            process.load(threadid, args[0], layout, atomicity)
-        }).await
+        let ordering = atomicity.clone().map(|x| x.mem_ordering);
+        self.thunk_impl(
+            backtrace,
+            Some((address.clone(), layout)),
+            ordering,
+            smallvec![address],
+            move |comp, args| {
+                process.load_impl(threadid, args[0], layout, ordering)
+            }).await
     }
     pub fn len(&self) -> usize {
         self.0.borrow().thunks.len()
@@ -205,10 +229,46 @@ impl DataFlow {
     pub fn seq(&self) -> usize {
         self.0.borrow().seq
     }
+    pub fn pop(&self) -> Option<Thunk> {
+        let mut this = self.0.borrow_mut();
+        if true {
+            return this.thunks.pop_front();
+        }
+        let mut pending_addresses = RangeMap::<u64, ()>::new();
+        let mut pop_index = None;
+        for (index, thunk) in this.thunks.iter().enumerate() {
+            let available = thunk.0.deps.iter().all(|x| x.try_get().is_some());
+            if let Some(address) = &thunk.0.address {
+                let layout = address.1;
+                let range = if let Some(address) = address.0.try_get() {
+                    let address = address.as_u64();
+                    address..address + layout.bytes()
+                } else {
+                    0..u64::max_value()
+                };
+                let known_first_at_address = pending_addresses.range(range.clone()).next().is_none();
+                pending_addresses.insert(range, ());
+                if known_first_at_address && available {
+                    pop_index = Some(index);
+                }
+            } else {
+                if available {
+                    pop_index = Some(index);
+                    break;
+                }
+            }
+        }
+        if let Some(pop_index) = pop_index {
+            this.thunks.remove(pop_index)
+        } else {
+            assert!(this.thunks.is_empty());
+            None
+        }
+    }
     pub fn step(&self) -> bool {
         timer!("DataFlow::step");
         let threadid = self.0.borrow().threadid;
-        let thunk = self.0.borrow_mut().thunks.pop_front();
+        let thunk = self.pop();
         if let Some(thunk) = thunk {
             let thunk2 = thunk.clone();
             let _d = defer(move || if thread::panicking() {
@@ -230,14 +290,6 @@ impl<T: Debug> Debug for DebugFlat<T> {
         write!(f, "{:?}", &self.0)
     }
 }
-
-impl Debug for Thread {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Stack")
-            .finish()
-    }
-}
-
 
 struct DebugDeps<'a>(&'a [Rc<Thunk>]);
 
@@ -266,7 +318,6 @@ impl Debug for ThunkState {
             ThunkState::Pending(_) => write!(f, "Pending"),
             ThunkState::Ready(value) => write!(f, "{:?}", value),
             ThunkState::Sandbag => write!(f, "Sandbag"),
-            _ => todo!(),
         }
     }
 }
@@ -309,3 +360,13 @@ impl PartialOrd for Thunk {
     }
 }
 
+impl Debug for DataFlow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let this = self.0.borrow();
+        f.debug_struct("DataFlow")
+            .field("threadid", &this.threadid)
+            .field("thunks", &this.thunks)
+            .field("seq", &this.seq)
+            .finish()
+    }
+}

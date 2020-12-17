@@ -1,6 +1,6 @@
 use crate::memory::Memory;
 use crate::value::Value;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Formatter, Display};
 use std::fmt;
 use crate::layout::Layout;
 use std::iter::repeat;
@@ -11,14 +11,23 @@ use std::rc::Rc;
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use llvm_ir::DebugLoc;
-use crate::compile::CFunc;
 use crate::interp::InterpFrame;
-use crate::future::{LocalBoxFuture, FutureExt};
-use crate::lazy::Lazy;
+use crate::util::future::{LocalBoxFuture, FutureExt};
+use crate::util::lazy::Lazy;
+use crate::compile::function::CFunc;
+
+#[derive(Debug)]
+pub struct Panic;
+
+impl Display for Panic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Panic")
+    }
+}
 
 pub trait Func: Debug {
     fn name(&self) -> &str;
-    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk>;
+    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Result<Thunk, Panic>>;
     fn debugloc(&self) -> Option<&DebugLoc> { None }
 }
 
@@ -46,7 +55,7 @@ impl Func for CFunc {
         self.src.debugloc.as_ref()
     }
 
-    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
+    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Result<Thunk, Panic>> {
         Box::pin(InterpFrame::call(flow, self, args.to_vec()))
     }
 }
@@ -60,7 +69,7 @@ impl<F: Func> Func for Lazy<F> {
         self.force().unwrap().debugloc()
     }
 
-    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
+    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Result<Thunk, Panic>> {
         self.force().unwrap().call_imp(flow, args)
     }
 }
@@ -71,12 +80,14 @@ impl Func for NativeComp {
     }
 
 
-    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx, args: &'flow [Thunk]) -> LocalBoxFuture<'flow, Thunk> {
+    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx, args: &'flow [Thunk]) -> LocalBoxFuture<'flow, Result<Thunk, Panic>> {
         let imp = self.imp.clone();
-        Box::pin(flow.data().thunk(flow.backtrace().clone(), args.iter().cloned().collect(),
-                                   move |comp: &ComputeCtx, args| {
-                                       imp(comp, args)
-                                   }))
+        Box::pin(async move {
+            Ok(flow.data().thunk(flow.backtrace().clone(), args.iter().cloned().collect(),
+                                 move |comp: &ComputeCtx, args| {
+                                     imp(comp, args)
+                                 }).await)
+        })
     }
 }
 
@@ -85,7 +96,7 @@ impl Func for NativeBomb {
         &self.name
     }
 
-    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Thunk> {
+    fn call_imp<'a>(&'a self, flow: &'a FlowCtx, args: &'a [Thunk]) -> LocalBoxFuture<'a, Result<Thunk, Panic>> {
         todo!("{:?}", self.name)
     }
 
@@ -100,13 +111,13 @@ impl Func for NativeExec {
     }
 
 
-    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx, args: &'flow [Thunk]) -> LocalBoxFuture<'flow, Thunk> {
+    fn call_imp<'flow>(&'flow self, flow: &'flow FlowCtx, args: &'flow [Thunk]) -> LocalBoxFuture<'flow, Result<Thunk, Panic>> {
         Box::pin(async move {
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(arg.clone().await);
             }
-            flow.data().constant(flow.backtrace().clone(), (self.imp)(flow, &values).await).await
+            Ok(flow.data().constant(flow.backtrace().clone(), (self.imp)(flow, &values).await).await)
         })
     }
 

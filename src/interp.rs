@@ -1,6 +1,6 @@
 use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand, DebugLoc, Type, HasDebugLoc, TypeRef};
 use std::collections::HashMap;
-use crate::function::{Func};
+use crate::function::{Func, Panic};
 use crate::data::{Thunk, ComputeCtx, ThunkDeps};
 use std::rc::Rc;
 use llvm_ir::instruction::{RMWBinOp, Sub, Mul, UDiv, SDiv, URem, SRem, Add, And, Or, Shl, LShr, AShr, ICmp, Xor, SExt, ZExt, Trunc, PtrToInt, IntToPtr, BitCast, InsertValue, AtomicRMW, Select, ExtractValue, CmpXchg, Fence, InlineAssembly, ExtractElement, InsertElement, ShuffleVector};
@@ -13,14 +13,13 @@ use crate::backtrace::{Backtrace, BacktraceFrame};
 use crate::flow::FlowCtx;
 use crate::symbols::Symbol;
 use crate::layout::{AggrLayout, Layout, Packing};
-use crate::compile::{CFunc, CBlockId, CInstr, CLocal, COperand, CTerm, CCompute};
 use vec_map::VecMap;
 use itertools::Itertools;
-use crate::operation::COperationName;
 use crate::timer;
 use smallvec::SmallVec;
 use smallvec::smallvec;
 use crate::async_timer;
+use crate::compile::function::{COperand, CInstr, CTerm, CBlockId, CFunc, CLocal};
 
 pub struct InterpFrame {
     origin: Option<CBlockId>,
@@ -39,11 +38,11 @@ enum DecodeResult {
 
 
 impl InterpFrame {
-    pub async fn call(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Thunk {
-        flow.recursor().spawn(Self::call_impl(flow,fun,params)).await
+    pub async fn call(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Result<Thunk, Panic> {
+        flow.recursor().spawn(Self::call_impl(flow, fun, params)).await
         //Self::call_impl(flow, fun, params).await
     }
-    pub async fn call_impl(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Thunk {
+    pub async fn call_impl(flow: &FlowCtx, fun: &CFunc, params: Vec<Thunk>) -> Result<Thunk, Panic> {
         let mut temps = VecMap::with_capacity(fun.locals.len());
         for (arg, param) in fun.args.iter().zip_eq(params.into_iter()) {
             temps.insert(arg.0, param);
@@ -61,11 +60,11 @@ impl InterpFrame {
         let inner = async {
             match operand {
                 COperand::Constant(class, value) => value.clone(),
-                //ctx.flow.constant().await,
                 COperand::Local(class, var) => {
                     self.temps.get(var.0).unwrap_or_else(|| panic!("No local {:?}", var)).clone()
                 }
                 COperand::Inline => todo!(),
+                COperand::Expr(expr) => ctx.flow.constant(ctx.flow.evaluate(expr)).await,
             }
         };
         //async_timer!("InterpFrame::decode_operand", inner).await
@@ -82,7 +81,7 @@ impl InterpFrame {
         //async_timer!("InterpFrame::decode_operands", inner).await
         inner.await
     }
-    pub async fn decode(&mut self, flow: &FlowCtx, fun: &CFunc) -> Thunk {
+    pub async fn decode(&mut self, flow: &FlowCtx, fun: &CFunc) -> Result<Thunk, Panic> {
         let mut block = &fun.blocks[0];
         loop {
             let mut phis = Vec::with_capacity(block.phis.len());
@@ -96,114 +95,20 @@ impl InterpFrame {
             for instr in block.instrs.iter() {
                 self.decode_instr(&InterpCtx {
                     flow: flow.with_frame(instr.frame.clone()),
-                }, &instr.instr).await
+                }, &instr.instr).await?
             }
             match self.decode_term(&InterpCtx {
                 flow: flow.with_frame(block.term.frame.clone()),
-            }, &block.term.term).await {
+            }, &block.term.term).await? {
                 DecodeResult::Jump(name) => {
                     self.origin = Some(block.id);
                     block = &fun.blocks[name.0];
                 }
-                DecodeResult::Return(result) => return result,
+                DecodeResult::Return(result) => return Ok(result),
             };
         }
     }
-    // pub async fn call<'flow>(flow: &'flow FlowCtx<'ctx, 'flow>,
-    //                          ectx: EvalCtx,
-    //                          fp: u64,
-    //                          fun: &'ctx Function,
-    //                          params: Vec<Thunk<'ctx>>) -> Thunk<'ctx> {
-    //     let temps =
-    //         fun.parameters.iter()
-    //             .zip(params.into_iter())
-    //             .map(|(n, v)| (&n.name, v))
-    //             .collect();
-    //     let blocks =
-    //         fun.basic_blocks.iter()
-    //             .map(|block| (&block.name, block))
-    //             .collect();
-    //     let mut frame = InterpFrame {
-    //         fp,
-    //         fun,
-    //         origin: None,
-    //         temps,
-    //         allocs: vec![],
-    //         result: None,
-    //         blocks,
-    //         ectx,
-    //     };
-    //     frame.decode(flow).await
-    // }
-    // pub fn decode<'flow>(&'flow mut self, flow: &'flow FlowCtx<'ctx, 'flow>) -> impl Future<Output=Thunk<'ctx>> + 'flow {
-    //     Box::pin(async move { self.decode_impl(flow).await })
-    // }
-    // pub async fn decode_impl<'flow>(&mut self, flow: &'flow FlowCtx<'ctx, 'flow>) -> Thunk<'ctx> {
-    //     let mut block = self.fun.basic_blocks.get(0).unwrap();
-    //     loop {
-    //         let mut iter = block.instrs.iter().peekable();
-    //         let mut phis = vec![];
-    //         while let Some(Instruction::Phi(phi)) = iter.peek() {
-    //             iter.next();
-    //             let (oper, _) =
-    //                 phi.incoming_values.iter()
-    //                     .find(|(_, name)| Some(name) == self.origin)
-    //                     .unwrap_or_else(|| panic!("No target {:?} in {:?}", self.origin, self.fun.name));
-    //             let deps = vec![self.get_temp(flow, oper).await];
-    //             phis.push((phi, deps));
-    //         }
-    //         for (phi, deps) in phis {
-    //             self.add_thunk(flow, format!("{}", phi), Some(&phi.dest), deps, |comp, args| args[0].clone()).await;
-    //         }
-    //         for instr in iter {
-    //             InterpCtx {
-    //                 ctx: flow.ctx(),
-    //                 flow: flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }),
-    //                 frame: self,
-    //                 name: format!("{} {:?}", instr, instr.get_debug_loc()),
-    //             }.decode_instr(instr).await;
-    //         }
-    //         match (InterpCtx {
-    //             ctx: flow.ctx(),
-    //             flow: flow.with_frame(BacktraceFrame { ip: self.fp, ..BacktraceFrame::default() }),
-    //             frame: self,
-    //             name: format!("{} {:?}", block.term, block.term.get_debug_loc()),
-    //         }.decode_term(&block.term).await) {
-    //             DecodeResult::Jump(name) => {
-    //                 self.origin = Some(&block.name);
-    //                 block = *self.blocks.get(name).unwrap();
-    //             }
-    //             DecodeResult::Return(result) => return result,
-    //         };
-    //     }
-    // }
-    // async fn add_thunk<'a>(&'a mut self,
-    //                        flow: &'a FlowCtx<'ctx, 'a>,
-    //                        name: String,
-    //                        dest: Option<&'ctx Name>,
-    //                        deps: Vec<Thunk<'ctx>>,
-    //                        compute: impl 'ctx + FnOnce(ComputeCtx<'ctx, '_>, &[&Value]) -> Value) -> Thunk<'ctx> {
-    //     let thunk = flow.data().thunk(name, flow.backtrace().clone(), deps, compute).await;
-    //     if let Some(dest) = dest {
-    //         self.temps.insert(dest, thunk.clone());
-    //     }
-    //     thunk
-    // }
-    // async fn get_temp<'flow>(&'flow mut self, flow: &FlowCtx<'ctx, 'flow>, oper: &'ctx Operand) -> Thunk<'ctx> {
-    //     match oper {
-    //         Operand::LocalOperand { name, .. } => {
-    //             self.temps.get(name).unwrap_or_else(|| panic!("No variable named {:?} in \n{:#?}", name, self)).clone()
-    //         }
-    //         Operand::ConstantOperand(constant) => {
-    //             let value = flow.ctx().get_constant(self.ectx, constant).1;
-    //             self.add_thunk(flow, constant.to_string(), None, vec![], move |_, _| value).await
-    //         }
-    //         Operand::MetadataOperand => {
-    //             self.add_thunk(flow, "metadata".to_string(), None, vec![], |_, _| Value::from(())).await
-    //         }
-    //     }
-    // }
-    async fn decode_instr(&mut self, ctx: &InterpCtx, instr: &CInstr) {
+    async fn decode_instr(&mut self, ctx: &InterpCtx, instr: &CInstr) -> Result<(), Panic> {
         match instr {
             CInstr::Compute(compute) => {
                 let deps = self.decode_operands(ctx, compute.operands.iter()).await;
@@ -219,8 +124,8 @@ impl InterpFrame {
             CInstr::Call(call) => {
                 let f = self.decode_operand(ctx, &call.func).await;
                 let args = self.decode_operands(ctx, call.arguments.iter()).await;
-                let imp = ctx.flow.process().reverse_lookup_fun(&f.await);
-                let result = imp.call_imp(&ctx.flow, &args).await;
+                let imp = ctx.flow.process().reverse_lookup_fun(&f.await).unwrap();
+                let result = imp.call_imp(&ctx.flow, &args).await?;
                 if let Some(dest) = call.dest {
                     self.assign(dest, result)
                 }
@@ -251,9 +156,11 @@ impl InterpFrame {
             CInstr::Store(store) => {
                 let address = self.decode_operand(ctx, &store.address).await;
                 let value = self.decode_operand(ctx, &store.value).await;
+                let layout = store.value.class().layout();
                 ctx.flow.data().store(
                     ctx.flow.backtrace().clone(),
                     address,
+                    layout,
                     value,
                     store.atomicity.clone()).await;
             }
@@ -261,38 +168,25 @@ impl InterpFrame {
                 let address = self.decode_operand(ctx, &cmpxchg.address).await;
                 let expected = self.decode_operand(ctx, &cmpxchg.expected).await;
                 let replacement = self.decode_operand(ctx, &cmpxchg.replacement).await;
-                let deps = smallvec![address, expected, replacement];
-                let layout = cmpxchg.expected.class().layout();
-                let types = ctx.flow.process().types();
-                let class = types.struc(vec![cmpxchg.expected.class().clone(), types.bool()], false);
-                let result = self.thunk(ctx, deps, {
-                    let cmpxchg = cmpxchg.clone();
-                    move |comp, args| {
-                        let current = comp.process.load(comp.threadid, args[0], layout, None).clone();
-                        let exchanged = &current == args[1];
-                        if exchanged {
-                            comp.process.store(comp.threadid, args[0], args[2], None);
-                        }
-                        Value::aggregate(&class, vec![current, Value::from(exchanged)].into_iter())
-                    }
-                }).await;
+                let class = cmpxchg.expected.class();
+                let result =
+                    ctx.flow.cmpxchg(class, address, expected, replacement, cmpxchg.success, cmpxchg.failure).await;
                 self.assign(cmpxchg.dest, result);
             }
             CInstr::AtomicRMW(atomicrmw) => {
                 let address = self.decode_operand(ctx, &atomicrmw.address).await;
                 let value = self.decode_operand(ctx, &atomicrmw.value).await;
-                let deps = smallvec![address, value];
-                let layout = atomicrmw.value.class().layout();
-                let result = self.thunk(ctx, deps, {
-                    let atomicrmw = atomicrmw.clone();
-                    move |comp, args| {
-                        let current = comp.process.load(comp.threadid, args[0], layout, Some(atomicrmw.atomicity.clone())).clone();
-                        let new = atomicrmw.operation.call_operation(&[&current, args[1]]);
-                        comp.process.store(comp.threadid, args[0], &new, Some(atomicrmw.atomicity.clone()));
-                        current
-                    }
-                }).await;
-                self.assign(atomicrmw.dest, result);
+                let atomicrmw = atomicrmw.clone();
+                let dest=atomicrmw.dest;
+                let result = ctx.flow.atomicrmw(
+                    atomicrmw.value.class().clone(),
+                    address,
+                    value,
+                    atomicrmw.atomicity.mem_ordering,
+                    move |current, operand| {
+                        atomicrmw.operation.call_operation(&[&current, &operand])
+                    }).await;
+                self.assign(dest, result);
             }
             CInstr::Freeze => todo!(),
             CInstr::Fence => {
@@ -300,9 +194,10 @@ impl InterpFrame {
             }
             CInstr::Unknown(instr) => todo!("{:?}", instr),
         }
+        Ok(())
     }
-    async fn decode_term(&mut self, ctx: &InterpCtx, term: &CTerm) -> DecodeResult {
-        match term {
+    async fn decode_term(&mut self, ctx: &InterpCtx, term: &CTerm) -> Result<DecodeResult, Panic> {
+        Ok(match term {
             CTerm::Ret(ret) => {
                 DecodeResult::Return(self.decode_operand(ctx, &ret.return_operand).await)
             }
@@ -323,14 +218,17 @@ impl InterpFrame {
             CTerm::Invoke(invoke) => {
                 let f = self.decode_operand(ctx, &invoke.function).await;
                 let args = self.decode_operands(ctx, invoke.arguments.iter()).await;
-                let imp = ctx.flow.process().reverse_lookup_fun(&f.await);
-                let result = imp.call_imp(&ctx.flow, &args).await;
+                let imp =
+                    ctx.flow.process()
+                        .reverse_lookup_fun(&f.clone().await)
+                        .unwrap_or_else(|e| panic!("{} {:#?}", e, f.full_debug()));
+                let result = imp.call_imp(&ctx.flow, &args).await?;
                 self.assign(invoke.dest, result);
                 DecodeResult::Jump(invoke.target)
             }
-            CTerm::Unreachable(_) => todo!(),
+            CTerm::Unreachable(_) => panic!(),
             CTerm::Resume => todo!(),
-        }
+        })
     }
     async fn thunk(
         &mut self,

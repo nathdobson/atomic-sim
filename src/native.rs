@@ -10,7 +10,8 @@ use std::convert::{TryInto, TryFrom};
 use crate::flow::FlowCtx;
 use crate::layout::Packing;
 use crate::function::NativeBomb;
-use crate::future::FutureExt;
+use crate::util::future::FutureExt;
+use crate::thread::ThreadId;
 
 macro_rules! overflow_binop {
     ($uop:expr, $sop:expr, $wrapping:ident, $checked:ident) => {
@@ -108,19 +109,28 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                 x => todo!("{:?}", x),
             } as u64)
         }),
-        native_comp_new("pthread_rwlock_rdlock", |comp, [_]| {
+        native_comp_new("pthread_rwlock_rdlock", |comp, [m]| {
+            println!("pthread_rwlock_rdlock({:?})", m);
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_rwlock_unlock", |comp, [_]| {
+        native_comp_new("pthread_rwlock_unlock", |comp, [m]| {
+            println!("pthread_rwlock_unlock({:?})", m);
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_lock", |comp, [_]| {
+        native_comp_new("pthread_mutex_lock", |comp, [m]| {
+            println!("pthread_mutex_lock({:?})", m);
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_unlock", |comp, [_]| {
+        native_comp_new("pthread_mutex_trylock", |comp, [m]| {
+            println!("pthread_mutex_trylock({:?})", m);
+            //TODO synchronize lock
+            Value::new(32, 0)
+        }),
+        native_comp_new("pthread_mutex_unlock", |comp, [m]| {
+            println!("pthread_mutex_unlock({:?})", m);
             //TODO synchronize lock
             Value::new(32, 0)
         }),
@@ -153,25 +163,33 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         native_comp_new("pthread_get_stacksize_np", |comp, [_]| {
             comp.process.value_from_address(0)
         }),
-        native_comp_new("pthread_attr_init", |comp, [attr]| {
+        native_exec_new("pthread_attr_init", |flow, [attr]| async move {
             let value = [0xFFu8; 64];
-            comp.process.store(comp.threadid, &attr, &Value::from_bytes_exact(&value), None);
+            flow.store(&attr, &Value::from_bytes_exact(&value)).await;
             Value::from(0u32)
-        }),
+        }.boxed_local()),
         native_comp_new("pthread_attr_setstacksize", |comp, [attr, stacksize]| {
             Value::from(0u32)
         }),
-        native_comp_new("pthread_create", |comp, [thread, attr, start_routine, arg]| {
+        native_exec_new("pthread_create", |flow, [thread, attr, start_routine, arg]| async move {
+            flow.store(&thread, &Value::from(flow.process().add_thread(&start_routine, &[arg]).0)).await;
             Value::from(0u32)
-        }),
+        }.boxed_local()),
         native_comp_new("pthread_attr_destroy", |comp, [attr]| {
             Value::from(0u32)
         }),
-        native_comp_new("pthread_join", |comp, [_, _]| {
+        native_exec_new("pthread_join", |flow, [thread, retval]| async move {
+            assert_eq!(retval.as_u64(), 0);
+            let thread = ThreadId(thread.unwrap_u64() as usize);
+            while flow.process().thread(thread).is_some() {
+                flow.constant(Value::from(())).await.await;
+            }
+            Value::from(0u32)
+        }.boxed_local()),
+        native_comp_new("pthread_detach", |comp, [_]| {
             Value::from(0u32)
         }),
         native_comp_new("_tlv_atexit", |comp, [func, objAddr]| {
-            //TODO synchronize lock
             Value::from(())
         }),
         native_comp_new("llvm.expect.i1", |comp, [arg, _]| {
@@ -183,14 +201,14 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         native_comp_new("llvm.lifetime.end.p0i8", |comp, [_, _]| {
             Value::from(())
         }),
-        native_comp_new("llvm.memcpy.p0i8.p0i8.i64", |comp, [dst, src, cnt, _]| {
-            comp.process.memcpy(comp.threadid, &dst, &src, cnt.as_u64());
+        native_exec_new("llvm.memcpy.p0i8.p0i8.i64", |flow, [dst, src, cnt, _]| async move {
+            flow.memcpy(&dst, &src, cnt.as_u64()).await;
             Value::from(())
-        }),
-        native_comp_new("llvm.memmove.p0i8.p0i8.i64", |comp, [dst, src, cnt, _]| {
-            comp.process.memcpy(comp.threadid, &dst, &src, cnt.as_u64());
+        }.boxed_local()),
+        native_exec_new("llvm.memmove.p0i8.p0i8.i64", |flow, [dst, src, cnt, _]| async move {
+            flow.memcpy(&dst, &src, cnt.as_u64()).await;
             Value::from(())
-        }),
+        }.boxed_local()),
         native_comp_new("llvm.ctpop.i64", |comp, [arg]| {
             Value::from(arg.unwrap_u64().count_ones() as u64)
         }),
@@ -198,9 +216,9 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             assert!(arg.unwrap_bool());
             Value::from(())
         }),
-        native_comp_new("write", |comp, [fd, buf, len]| {
+        native_exec_new("write", |flow, [fd, buf, len]| async move {
             let value = if len.as_u64() > 0 {
-                comp.process.load(comp.threadid, &buf, Layout::from_bytes(len.as_u64(), 1), None)
+                flow.load(&buf, Layout::from_bytes(len.as_u64(), 1)).await
             } else {
                 Value::from(())
             };
@@ -208,7 +226,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             let string = String::from_utf8(value.to_vec()).unwrap();
             print!("{}", string);
             len
-        }),
+        }.boxed_local()),
         native_comp_new("llvm.trap", |comp, []| {
             panic!("It's a trap!");
         }),
@@ -227,12 +245,12 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             let prot = prot.unwrap_u32();
             Value::from(0u32)
         }),
-        native_comp_new("llvm.memset.p0i8.i64", |comp, [addr, val, len, _]| {
-            comp.process.store(comp.threadid, &addr,
-                               &Value::from_bytes_exact(&vec![val.unwrap_u8(); len.as_u64() as usize]),
-                               None);
+        native_exec_new("llvm.memset.p0i8.i64", |flow, [addr, val, len, _]| async move {
+            flow.store(&addr,
+                       &Value::from_bytes_exact(&vec![val.unwrap_u8(); len.as_u64() as usize]),
+            ).await;
             Value::from(())
-        }),
+        }.boxed_local()),
         native_comp_new("llvm.fshl.i64", |comp, [a, b, s]| {
             Value::from((((a.as_u128() << 64 | b.as_u128()) << s.as_u128()) >> 64) as u64)
         }),
@@ -245,34 +263,34 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         native_comp_new("__rust_alloc", |comp, [len, align]| {
             comp.process.alloc(comp.threadid, Layout::from_bytes(len.as_u64(), align.as_u64()))
         }),
-        native_comp_new("__rust_realloc", |comp, [ptr, old_size, align, new_size]| {
-            comp.process.realloc(comp.threadid, &ptr,
-                                 Layout::from_bytes(old_size.as_u64(), align.as_u64()),
-                                 Layout::from_bytes(new_size.as_u64(), align.as_u64()))
-        }),
+        native_exec_new("__rust_realloc", |flow, [ptr, old_size, align, new_size]| async move {
+            flow.realloc(&ptr,
+                         Layout::from_bytes(old_size.as_u64(), align.as_u64()),
+                         Layout::from_bytes(new_size.as_u64(), align.as_u64())).await
+        }.boxed_local()),
         native_comp_new("__rust_dealloc", |comp, [ptr, size, align]| {
             comp.process.free(comp.threadid, &ptr);
             Value::from(())
         }),
-        native_comp_new("memchr", |comp, [ptr, value, num]| {
+        native_exec_new("memchr", |flow, [ptr, value, num]| async move {
             for i in 0..num.as_u64() {
-                let ptr = comp.process.value_from_address(ptr.as_u64() + i);
-                let v = comp.process.load(comp.threadid, &ptr, Layout::from_bytes(1, 1), None);
+                let ptr = flow.process().value_from_address(ptr.as_u64() + i);
+                let v = flow.load(&ptr, Layout::from_bytes(1, 1)).await;
                 if v.unwrap_u8() as u32 == value.unwrap_u32() {
                     return ptr;
                 }
             }
-            comp.process.value_from_address(0)
-        }),
+            flow.process().value_from_address(0)
+        }.boxed_local()),
         native_exec_new("strlen", |flow, [str]| async move {
             flow.strlen(&str).await
         }.boxed_local()),
-        native_comp_new("memcmp", |comp, [ptr1, ptr2, num]| {
+        native_exec_new("memcmp", |flow, [ptr1, ptr2, num]| async move {
             for i in 0..num.as_u64() {
-                let ptr1 = comp.process.value_from_address(ptr1.as_u64() + i);
-                let ptr2 = comp.process.value_from_address(ptr2.as_u64() + i);
-                let v1 = comp.process.load(comp.threadid, &ptr1, Layout::from_bytes(1, 1), None);
-                let v2 = comp.process.load(comp.threadid, &ptr2, Layout::from_bytes(1, 1), None);
+                let ptr1 = flow.process().value_from_address(ptr1.as_u64() + i);
+                let ptr2 = flow.process().value_from_address(ptr2.as_u64() + i);
+                let v1 = flow.load(&ptr1, Layout::from_bytes(1, 1)).await;
+                let v2 = flow.load(&ptr2, Layout::from_bytes(1, 1)).await;
                 match v1.unwrap_u8().cmp(&v2.unwrap_u8()) {
                     Ordering::Less => return Value::from(-1i32),
                     Ordering::Equal => {}
@@ -280,7 +298,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                 }
             }
             Value::from(0i32)
-        }),
+        }.boxed_local()),
         native_exec_new("getenv", |flow, [name]| async move {
             let mut cstr = vec![];
             for i in name.as_u64().. {
@@ -295,19 +313,19 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                 _ => flow.process().value_from_address(0)
             }
         }.boxed_local()),
-        native_comp_new("getcwd", |comp, [buf, size]| {
+        native_exec_new("getcwd", |flow, [buf, size]| async move {
             if buf.as_u64() != 0 {
                 if size.as_u64() != 0 {
-                    comp.process.store(comp.threadid, &buf, &Value::from(0u8), None);
+                    flow.store(&buf, &Value::from(0u8)).await;
                 }
                 buf
             } else {
                 let layout = Layout::of_int(8);
-                let res = comp.process.alloc(comp.threadid, layout);
-                comp.process.store(comp.threadid, &res, &Value::from(0u8), None);
+                let res = flow.alloc(layout).await;
+                flow.store(&res, &Value::from(0u8)).await;
                 res
             }
-        }),
+        }.boxed_local()),
         native_comp_new("_Unwind_RaiseException", |comp, [object]| {
             panic!("Unwinding!");
         }),
@@ -373,7 +391,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                 let zero = flow.process().null();
                 let one = flow.process().value_from_address(1);
                 let name = flow.string(&format!("{:?}", flow.process().reverse_lookup(&addr))).await;
-                flow.invoke(&cb, &[&data, &addr, &name, &addr, &one]).await;
+                flow.invoke(&cb, &[&data, &addr, &name, &addr, &one]).await.unwrap();
                 Value::from(0u32)
             }.boxed_local()),
         native_exec_new(
@@ -390,7 +408,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             }.boxed_local()),
         native_exec_new("dlsym", |flow, [handle, name]| async move {
             let name = flow.get_string(&name).await;
-            flow.process().lookup(None, &name).clone()
+            flow.process().value_from_address(flow.process().lookup(None, &name).global().unwrap())
         }.boxed_local()),
         native_exec_new(
             "__rdos_backtrace_pcinfo",
@@ -398,7 +416,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                 //println!("Calling __rdos_backtrace_pcinfo({:?}, {:?}, {:?}, {:?}, {:?})", state, pc, cb, error, data);
                 let null = flow.process().null();
                 let symbol = flow.process().reverse_lookup(&pc);
-                let fun = flow.process().reverse_lookup_fun(&pc);//functions.get(&symbol).unwrap();
+                let fun = flow.process().reverse_lookup_fun(&pc).unwrap();
                 let symbol_name = flow.string(&format!("{:?}", symbol)).await;
                 let debugloc = fun.debugloc();
                 let (filename, line) = if let Some(debugloc) = debugloc {
@@ -407,7 +425,7 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
                     ("", 0)
                 };
                 let filename = flow.string(filename).await;
-                flow.invoke(&cb, &[&data, &pc, &filename, &Value::from(line), &symbol_name]).await;
+                flow.invoke(&cb, &[&data, &pc, &filename, &Value::from(line), &symbol_name]).await.unwrap();
                 Value::from(0u32)
             }.boxed_local()),
         native_exec_new("getentropy", |flow, [buf, len]| async move {
@@ -415,6 +433,9 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             flow.store(&buf, &data).await;
             Value::from(0u32)
         }.boxed_local()),
+        native_comp_new("strerror_r", |comp, [errnum, buf, len]| {
+            Value::from(-1i32)
+        }),
     ]);
     result.append(&mut overflow_binop!("uadd", "sadd", wrapping_add, checked_add));
     result.append(&mut overflow_binop!("umul", "smul", wrapping_mul, checked_mul));
@@ -500,7 +521,6 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         "pthread_cond_signal",
         "pthread_cond_timedwait",
         "pthread_cond_wait",
-        "pthread_detach",
         "pthread_key_create",
         "pthread_key_delete",
         "pthread_rwlock_wrlock",
@@ -531,7 +551,6 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         "socket",
         "socketpair",
         "stat$INODE64",
-        "strerror_r",
         "symlink",
         "unlink",
         "unsetenv",

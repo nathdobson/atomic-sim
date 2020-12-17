@@ -3,10 +3,12 @@ use crate::value::{Value, add_u64_i64};
 use std::ops::Add;
 use std::iter;
 use crate::layout::{Layout, Packing};
-use crate::class::{Class, ClassKind};
+use crate::compile::class::{Class, ClassKind, VectorClass, TypeMap};
 use bitvec::vec::BitVec;
 use crate::timer;
 use smallvec::SmallVec;
+use crate::process::Process;
+use itertools::Itertools;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum CIntPredicate {
@@ -83,18 +85,127 @@ pub enum COperationName {
     SIToFP(Class),
     BitCast(Class),
     Select,
+    Aggregate(Class),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct COperation {
+    pub name: COperationName,
     pub input: Vec<Class>,
     pub output: Class,
-    pub name: COperationName,
+}
+
+pub struct OperCompiler {
+    process: Process,
 }
 
 macro_rules! repeat5 {
     ($x:expr)=>(($x,$x,$x,$x,$x))
 }
+
+impl OperCompiler {
+    pub fn new(process: Process) -> Self {
+        OperCompiler { process }
+    }
+    pub fn type_map(&self) -> TypeMap {
+        self.process.types()
+    }
+    pub fn compile_operation(&self, name: COperationName, operands: &[&Class]) -> COperation {
+        use COperationName::*;
+        let output = match &name {
+            Xchg
+            | Add
+            | Sub
+            | Mul
+            | UDiv
+            | SDiv
+            | URem
+            | SRem
+            | And
+            | Or
+            | Xor
+            | Shl
+            | LShr
+            | AShr
+            | FAdd
+            | FSub
+            | FMul
+            | FDiv
+            | FRem
+            | FNeg => {
+                assert!(operands.iter().all_equal());
+                operands[0].clone()
+            }
+            ZExt(target)
+            | SExt(target)
+            | Trunc(target)
+            | FPTrunc(target)
+            | FPExt(target)
+            | FPToUI(target)
+            | FPToSI(target)
+            | UIToFP(target)
+            | SIToFP(target) => {
+                match operands[0].kind() {
+                    ClassKind::VectorClass(VectorClass { element, len }) =>
+                        self.type_map().vector(target.clone(), *len),
+                    _ => target.clone()
+                }
+            }
+            ICmp(_)
+            | FCmp(_) => {
+                match operands[0].kind() {
+                    ClassKind::VectorClass(VectorClass { element, len }) =>
+                        self.type_map().vector(self.type_map().bool(), *len),
+                    _ => self.type_map().bool()
+                }
+            }
+            BitCast(to) => to.clone(),
+            GetElementPtr => todo!(),
+            ExtractElement => {
+                operands[0].element(-1).class
+            }
+            ExtractValue(indices) => operands[0].element_rec(&mut indices.iter().cloned()).class.clone(),
+            InsertElement => operands[0].clone(),
+            InsertValue(_) => operands[0].clone(),
+            Shuffle(indices) => {
+                let l = operands[0].as_vector().unwrap();
+                self.type_map().vector(l.element.clone(), indices.len() as u64)
+            }
+            Select => {
+                assert_eq!(operands[1], operands[2]);
+                operands[1].clone()
+            }
+            Aggregate(output) => output.clone(),
+        };
+        COperation {
+            input: operands.iter().cloned().cloned().collect(),
+            output,
+            name,
+        }
+    }
+
+
+    // fn const_operation(&self, operands: &[&ConstantRef], oper: COperationName) -> (Class, Value) {
+    //     let inputs =
+    //         operands.iter()
+    //             .map(|operand| self.compile_const(operand))
+    //             .collect::<Vec<_>>();
+    //     let input_classes = inputs.iter().map(|operand| &operand.0).collect::<Vec<_>>();
+    //     let input_values = inputs.iter().map(|operand| &operand.1).collect::<Vec<_>>();
+    //     let oper = self.compile_operation(&input_classes, oper);
+    //     let output = oper.call_operation(&input_values);
+    //     (oper.output, output)
+    // }
+    fn map_vector(&self, c: &Class, f: impl FnOnce(&Class) -> Class) -> Class {
+        match c.kind() {
+            ClassKind::VectorClass(VectorClass { element, len }) => {
+                self.type_map().vector(f(element), *len)
+            }
+            _ => f(c)
+        }
+    }
+}
+
 impl COperation {
     pub fn call_operation(&self, inputs: &[&Value]) -> Value {
         use COperationName::*;
@@ -201,6 +312,9 @@ impl COperation {
                 } else {
                     inputs[2].clone()
                 }
+            }
+            Aggregate(output) => {
+                Value::aggregate(output, inputs.iter().cloned().cloned())
             }
         }
     }

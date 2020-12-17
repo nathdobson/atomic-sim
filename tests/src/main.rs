@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::collections::{HashMap, BTreeSet, BTreeMap};
 use std::hash::BuildHasher;
 use core::mem;
+use std::sync::{Arc, Mutex};
 
 
 fn fib(x: usize) -> usize {
@@ -27,9 +28,18 @@ fn factorial(x: usize) -> usize {
 }
 
 fn main() {
-    let mut map = HashMap::new();
-    for i in 0..1000 {
-        map.insert(i, i);
+    let x = Arc::new(Mutex::new(0));
+    for _ in 0..10 {
+        (0..2)
+            .map(|v| {
+                let x = x.clone();
+                thread::spawn(move || {
+                    *x.lock().unwrap() = v;
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|t| t.join().unwrap());
+        println!("{:?}", x);
     }
-    println!("{:?}", map.get(&42));
 }

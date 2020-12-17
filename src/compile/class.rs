@@ -11,9 +11,10 @@ use std::rc::{Rc, Weak};
 use llvm_ir::types::{FPType, Types, NamedStructDef};
 use llvm_ir::constant::Constant::Int;
 use llvm_ir::{TypeRef, Type, Module};
-use crate::by_address::ByAddress;
-use crate::lazy::{Lazy, RecursiveError};
+use crate::util::lazy::{Lazy, RecursiveError};
 use itertools::Itertools;
+use std::any::Any;
+use crate::util::by_address::ByAddress;
 
 #[derive(Clone, Eq, PartialOrd, PartialEq, Ord, Hash, Debug)]
 pub struct Element {
@@ -250,6 +251,13 @@ impl TypeMap {
         let ty = self.0.borrow().types.struct_of(element_types, is_packed);
         self.get(&ty)
     }
+    pub fn named_struct(&self, name: &str) -> Result<Class, String> {
+        let ty =
+            self.0.borrow()
+                .types.named_struct(name)
+                .ok_or_else(|| format!("No named struct {:?}", name))?;
+        Ok(self.get(&ty))
+    }
 }
 
 
@@ -267,15 +275,15 @@ impl Class {
     }
     pub fn element(&self, index: i64) -> Element {
         match self.kind() {
-            ClassKind::VoidClass(_) => panic!(),
-            ClassKind::IntegerClass(_) => panic!(),
+            ClassKind::VoidClass(_) => panic!("Cannot index into void"),
+            ClassKind::IntegerClass(_) => panic!("Cannot index into integer"),
             ClassKind::PointerClass(pointer) => {
                 let pointee = pointer.pointee.upgrade();
                 let bit_offset = pointee.layout().pad_to_align().bits() as i64 * index;
                 Element { class: pointee, bit_offset }
             }
-            ClassKind::FPClass(_) => panic!(),
-            ClassKind::FuncClass(_) => panic!(),
+            ClassKind::FPClass(_) => panic!("Cannot index into float"),
+            ClassKind::FuncClass(_) => panic!("Cannot index into func"),
             ClassKind::VectorClass(vector) => {
                 assert_eq!(vector.element.layout().bit_align() % 8, 0);
                 Element {

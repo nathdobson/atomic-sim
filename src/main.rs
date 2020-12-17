@@ -17,20 +17,20 @@
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
 #[global_allocator]
-static GLOBAL: crate::allocator::Allocator = crate::allocator::Allocator;
+static GLOBAL: crate::util::allocator::Allocator = crate::util::allocator::Allocator;
 
 use llvm_ir::Module;
 use std::{fs, panic, mem};
 use std::ffi::OsStr;
 use std::rc::Rc;
 use std::borrow::Cow;
-use crate::compile::Compiler;
-use crate::symbols::{SymbolTable, Symbol, ModuleId};
+use crate::symbols::{SymbolTable, Symbol};
 use crate::process::Process;
 use std::panic::AssertUnwindSafe;
 use std::thread::spawn;
 use std::time::Instant;
-use crate::timer::dump_trace;
+use crate::util::timer::dump_trace;
+use crate::compile::module::Compiler;
 
 //mod process;
 mod layout;
@@ -46,25 +46,16 @@ mod backtrace;
 // mod flow;
 // mod compute;
 // mod arith;
-mod class;
-mod compile;
 mod memory;
 mod process;
 mod data;
 mod thread;
 mod flow;
 mod function;
-mod by_address;
-mod lazy;
-mod operation;
 mod interp;
-mod future;
-mod rangemap;
-mod freelist;
 #[macro_use]
-mod timer;
-mod recursor;
-mod allocator;
+mod compile;
+mod util;
 
 pub fn main() {
     // use crate::thread::Thread;
@@ -100,8 +91,8 @@ pub fn main() {
     let mut compiler = Compiler::new(process.clone());
     compiler.compile_modules(modules);
 
-    process.add_thread(Symbol::External("main".to_string()));
-    println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| {
+    process.add_main();
+    panic::catch_unwind(AssertUnwindSafe(|| {
         let start = Instant::now();
         for i in 0.. {
             if !process.step() {
@@ -109,25 +100,7 @@ pub fn main() {
             }
         }
         println!("Step time: {:?}", Instant::now() - start);
-    })));
+    })).ok();
     mem::drop(process_scope);
     dump_trace();
-    // let modules = &modules;
-    // let native = native::builtins();
-    // let ctx = Rc::new(Ctx::new(modules, native));
-    // let mut process = Process::new(ctx.clone());
-    // process.add_thread(Symbol::External("main".to_string()));
-    // println!("{:?}", panic::catch_unwind(AssertUnwindSafe(|| {
-    //     for i in 0.. {
-    //         if !process.step() {
-    //             break;
-    //         }
-    //         if i % 100000 == 0 {
-    //             println!("{:?}", process.time());
-    //         }
-    //     }
-    // })));
-    // println!("{:#?}", process);
-    // mem::drop(process);
-    // mem::drop(ctx);
 }
