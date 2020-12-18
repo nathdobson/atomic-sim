@@ -183,6 +183,28 @@ impl FlowCtx {
             }).await
     }
 
+    pub async fn cmpxchg_u64(&self,
+                             address: &Value,
+                             expected: u64,
+                             replacement: u64,
+                             success: MemoryOrdering,
+                             failure: MemoryOrdering) -> (u64, bool) {
+        let c64 = self.process().types().int(64);
+        let c1 = self.process().types().int(1);
+        let c64_1 = self.process().types().struc(vec![c64.clone(), c1], false);
+        let address = self.constant(address.clone()).await;
+        let expected = self.constant(Value::from(expected)).await;
+        let replacement = self.constant(Value::from(replacement)).await;
+        let output = self.cmpxchg(&c64,
+                                  address.clone(),
+                                  expected.clone(),
+                                  replacement.clone(),
+                                  MemoryOrdering::Acquire,
+                                  MemoryOrdering::Monotonic).await.await;
+        (output.extract(&c64_1, 0).unwrap_u64(),
+         output.extract(&c64_1, 1).unwrap_bool())
+    }
+
     pub async fn atomicrmw(
         &self,
         class: Class,

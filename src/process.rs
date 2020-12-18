@@ -30,7 +30,7 @@ use crate::symbols::SymbolDef;
 use llvm_ir::module::ThreadLocalMode;
 use crate::symbols::ThreadLocalKey;
 use crate::compile::module::ModuleId;
-use rand::seq::SliceRandom;
+use rand::seq::{SliceRandom, IteratorRandom};
 
 pub struct ProcessInner {
     functions: HashMap<u64, Rc<dyn Func>>,
@@ -40,6 +40,7 @@ pub struct ProcessInner {
     rng: XorShiftRng,
     threads: BTreeMap<ThreadId, Thread>,
     next_threadid: usize,
+    schedule: Option<(ThreadId, usize)>,
     symbols: SymbolTable,
     memory: Memory,
     types: TypeMap,
@@ -64,6 +65,7 @@ impl Process {
             symbols: SymbolTable::new(),
             memory: Memory::new(),
             types: TypeMap::new(ptr_bits),
+            schedule: None,
         })));
         (result.clone(), ProcessScope(result))
     }
@@ -90,26 +92,40 @@ impl Process {
         self.0.borrow_mut().threads.insert(threadid, thread);
         threadid
     }
-    pub fn step(&self) -> bool {
-        timer!("Process::step");
-        let (threadid, thread, count) = {
-            let mut this = self.0.borrow_mut();
-            let this = this.deref_mut();
-            if this.threads.is_empty() {
-                return false;
-            }
-            let index = this.rng.gen_range(0, this.threads.len());
-            let count = *[1, 10, 100, 1000].choose(&mut this.rng).unwrap();
-            let (threadid, thread) = this.threads.iter_mut().nth(index).unwrap();
-            (*threadid, thread.clone(), count)
-        };
-        for i in 0..count {
-            if !thread.step() {
-                self.0.borrow_mut().threads.remove(&threadid);
-                break;
+    pub fn schedule(&self) -> Option<ThreadId> {
+        let mut this = self.0.borrow_mut();
+        let this = this.deref_mut();
+        if let Some((t, c)) = this.schedule {
+            if !this.threads.contains_key(&t) {
+                this.schedule = None;
             }
         }
-        true
+        if this.schedule.is_none() {
+            if let Some(t) = this.threads.keys().choose(&mut this.rng) {
+                this.schedule = Some((*t, this.rng.gen_range(1, 100)));
+            }
+        }
+        this.schedule.take().map(|(t, c)| {
+            if c > 0 {
+                this.schedule = Some((t, c - 1));
+            }
+            t
+        })
+    }
+    pub fn yield_scheduler(&self) {
+        self.0.borrow_mut().schedule = None;
+    }
+    pub fn step(&self) -> bool {
+        timer!("Process::step");
+        if let Some(threadid) = self.schedule() {
+            let thread = self.0.borrow().threads.get(&threadid).unwrap().clone();
+            if !thread.step() {
+                self.0.borrow_mut().threads.remove(&threadid);
+            }
+            true
+        } else {
+            false
+        }
     }
     pub fn free(&self, tid: ThreadId, ptr: &Value) {
         self.0.borrow_mut().memory.free(ptr)

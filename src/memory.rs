@@ -50,6 +50,7 @@ impl Memory {
         Value::from(result)
     }
     pub fn store_impl(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, ordering: Option<MemoryOrdering>) {
+        //println!("Store *{:?} = {:?}", ptr, value);
         let start = ptr.as_u64();
         let value = value.as_bytes().to_vec();
         let range = start..start + value.len() as u64;
@@ -62,6 +63,7 @@ impl Memory {
         self.cells.insert(range, log);
     }
     pub fn load_impl(&mut self, ptr: &Value, layout: Layout, ordering: Option<MemoryOrdering>) -> Value {
+
         let start = ptr.as_u64();
         let range = start..start + layout.bytes();
         let mut result = Value::zero(layout.bits());
@@ -69,6 +71,7 @@ impl Memory {
             result.as_bytes_mut()[(r.start - start) as usize..(r.end - start) as usize]
                 .copy_from_slice(&v.0.value[(r.start - v.0.start) as usize..(r.end - v.0.start) as usize]);
         }
+        //println!("Load *{:?} = {:?}", ptr, result);
         result
     }
     pub fn debug_info(&self, ptr: &Value) -> String {

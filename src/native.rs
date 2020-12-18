@@ -12,6 +12,10 @@ use crate::layout::Packing;
 use crate::function::NativeBomb;
 use crate::util::future::FutureExt;
 use crate::thread::ThreadId;
+use llvm_ir::instruction::MemoryOrdering;
+
+const UNLOCKED: u64 = 0x32AAABA7;
+const LOCKED: u64 = 1;
 
 macro_rules! overflow_binop {
     ($uop:expr, $sop:expr, $wrapping:ident, $checked:ident) => {
@@ -89,7 +93,32 @@ macro_rules! unop {
     }
 }
 
+async fn lock(flow: &FlowCtx, m: &Value) {
+    loop {
+        let output = flow.cmpxchg_u64(
+            m,
+            UNLOCKED,
+            LOCKED,
+            MemoryOrdering::Acquire,
+            MemoryOrdering::Monotonic).await;
+        if output == (UNLOCKED, true) {
+            break;
+        } else {
+            assert_eq!(output, (LOCKED, false));
+            flow.process().yield_scheduler();
+        }
+    }
+}
 
+async fn unlock(flow: &FlowCtx, m: &Value) {
+    assert_eq!(flow.cmpxchg_u64(
+        m,
+        LOCKED,
+        UNLOCKED,
+        MemoryOrdering::Release,
+        MemoryOrdering::Monotonic).await,
+               (LOCKED, true));
+}
 
 pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
     let mut result: Vec<Rc<dyn 'static + Func>> = vec![];
@@ -114,26 +143,32 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_rwlock_unlock", |comp, [m]| {
+        native_exec_new("pthread_rwlock_unlock", |flow, [m]| async move {
             println!("pthread_rwlock_unlock({:?})", m);
             //TODO synchronize lock
             Value::new(32, 0)
-        }),
-        native_comp_new("pthread_mutex_lock", |comp, [m]| {
-            println!("pthread_mutex_lock({:?})", m);
-            //TODO synchronize lock
-            Value::new(32, 0)
-        }),
-        native_comp_new("pthread_mutex_trylock", |comp, [m]| {
-            println!("pthread_mutex_trylock({:?})", m);
-            //TODO synchronize lock
-            Value::new(32, 0)
-        }),
-        native_comp_new("pthread_mutex_unlock", |comp, [m]| {
-            println!("pthread_mutex_unlock({:?})", m);
-            //TODO synchronize lock
-            Value::new(32, 0)
-        }),
+        }.boxed_local()),
+        native_exec_new("pthread_mutex_trylock", |flow, [m]| async move {
+            let result = flow.cmpxchg_u64(
+                &m,
+                UNLOCKED,
+                LOCKED,
+                MemoryOrdering::Acquire,
+                MemoryOrdering::Monotonic).await;
+            if result.1 {
+                Value::from(0u32)
+            } else {
+                Value::from(16u32)
+            }
+        }.boxed_local()),
+        native_exec_new("pthread_mutex_lock", |flow, [m]| async move {
+            lock(flow, &m).await;
+            Value::from(0u32)
+        }.boxed_local()),
+        native_exec_new("pthread_mutex_unlock", |flow, [m]| async move {
+            unlock(flow, &m).await;
+            Value::from(0u32)
+        }.boxed_local()),
         native_comp_new("pthread_mutexattr_init", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
@@ -142,15 +177,23 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
-        native_comp_new("pthread_mutex_init", |comp, [_, _]| {
-            //TODO synchronize lock
+        native_exec_new("pthread_mutex_init", |flow, [m, _]| async move {
+            flow.store(&m, &Value::from(UNLOCKED)).await;
             Value::new(32, 0)
-        }),
+        }.boxed_local()),
         native_comp_new("pthread_mutexattr_destroy", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
         native_comp_new("pthread_mutex_destroy", |comp, [_]| {
+            //TODO synchronize lock
+            Value::new(32, 0)
+        }),
+        native_comp_new("pthread_cond_broadcast", |comp, [_]| {
+            //TODO synchronize lock
+            Value::new(32, 0)
+        }),
+        native_comp_new("pthread_cond_destroy", |comp, [_]| {
             //TODO synchronize lock
             Value::new(32, 0)
         }),
@@ -184,6 +227,12 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
             while flow.process().thread(thread).is_some() {
                 flow.constant(Value::from(())).await.await;
             }
+            Value::from(0u32)
+        }.boxed_local()),
+        native_exec_new("pthread_cond_wait", |flow, [cond, mutex]| async move {
+            unlock(flow, &mutex).await;
+            flow.process().yield_scheduler();
+            lock(flow, &mutex).await;
             Value::from(0u32)
         }.boxed_local()),
         native_comp_new("pthread_detach", |comp, [_]| {
@@ -516,11 +565,8 @@ pub fn builtins() -> Vec<Rc<dyn 'static + Func>> {
         "posix_spawnattr_setsigmask",
         "posix_spawnp",
         "pread",
-        "pthread_cond_broadcast",
-        "pthread_cond_destroy",
         "pthread_cond_signal",
         "pthread_cond_timedwait",
-        "pthread_cond_wait",
         "pthread_key_create",
         "pthread_key_delete",
         "pthread_rwlock_wrlock",

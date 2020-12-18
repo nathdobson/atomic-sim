@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use std::collections::{HashMap, BTreeSet, BTreeMap};
 use std::hash::BuildHasher;
 use core::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Barrier};
 
 
 fn fib(x: usize) -> usize {
@@ -30,10 +30,15 @@ fn factorial(x: usize) -> usize {
 fn main() {
     let x = Arc::new(Mutex::new(0));
     for _ in 0..10 {
-        (0..2)
+        println!("TEST");
+        let barrier=Arc::new(Barrier::new(10));
+        (0..10)
             .map(|v| {
+                let barrier=barrier.clone();
                 let x = x.clone();
                 thread::spawn(move || {
+                    barrier.wait();
+                    println!("A{:?}", v);
                     *x.lock().unwrap() = v;
                 })
             })
