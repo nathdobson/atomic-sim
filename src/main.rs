@@ -13,6 +13,7 @@
 #![feature(maybe_uninit_extra)]
 #![feature(maybe_uninit_ref)]
 #![feature(thread_local)]
+#![feature(generic_associated_types)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code, unused_macros)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
