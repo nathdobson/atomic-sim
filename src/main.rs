@@ -57,6 +57,7 @@ mod interp;
 #[macro_use]
 mod compile;
 mod util;
+mod scheduler;
 
 pub fn main() {
     // use crate::thread::Thread;

@@ -237,6 +237,7 @@ impl FlowCtx {
         &self.backtrace
     }
     pub fn recursor(&self) -> &Recursor { &self.recursor }
+    pub fn threadid(&self) -> ThreadId { self.data.threadid() }
 }
 
 

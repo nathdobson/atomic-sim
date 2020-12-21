@@ -2,7 +2,7 @@ use rand_xorshift::XorShiftRng;
 use rand::SeedableRng;
 use rand::Rng;
 use std::rc::Rc;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
@@ -31,19 +31,17 @@ use llvm_ir::module::ThreadLocalMode;
 use crate::symbols::ThreadLocalKey;
 use crate::compile::module::ModuleId;
 use rand::seq::{SliceRandom, IteratorRandom};
+use crate::scheduler::Scheduler;
 
 pub struct ProcessInner {
     functions: HashMap<u64, Rc<dyn Func>>,
     thread_local_inits: HashMap<ThreadLocalKey, (Layout, Value)>,
     ptr_bits: u64,
     page_size: u64,
-    rng: XorShiftRng,
-    threads: BTreeMap<ThreadId, Thread>,
-    next_threadid: usize,
-    schedule: Option<(ThreadId, usize)>,
     symbols: SymbolTable,
     memory: Memory,
     types: TypeMap,
+    scheduler: Scheduler,
 }
 
 #[derive(Clone)]
@@ -59,13 +57,10 @@ impl Process {
             thread_local_inits: HashMap::new(),
             ptr_bits,
             page_size: 4096,
-            threads: BTreeMap::new(),
-            next_threadid: 0,
-            rng: XorShiftRng::seed_from_u64(0),
             symbols: SymbolTable::new(),
             memory: Memory::new(),
             types: TypeMap::new(ptr_bits),
-            schedule: None,
+            scheduler: Scheduler::new(),
         })));
         (result.clone(), ProcessScope(result))
     }
@@ -81,46 +76,12 @@ impl Process {
             Value::new(self.ptr_bits(), 0)];
         self.add_thread(&self.value_from_address(fun), params);
     }
-    pub fn add_thread(&self, fun: &Value, params: &[Value]) -> ThreadId {
-        let threadid = {
-            let mut this = self.0.borrow_mut();
-            let threadid = ThreadId(this.next_threadid);
-            this.next_threadid += 1;
-            threadid
-        };
-        let thread = Thread::new(self.clone(), threadid, fun, params);
-        self.0.borrow_mut().threads.insert(threadid, thread);
-        threadid
-    }
-    pub fn schedule(&self) -> Option<ThreadId> {
-        let mut this = self.0.borrow_mut();
-        let this = this.deref_mut();
-        if let Some((t, c)) = this.schedule {
-            if !this.threads.contains_key(&t) {
-                this.schedule = None;
-            }
-        }
-        if this.schedule.is_none() {
-            if let Some(t) = this.threads.keys().choose(&mut this.rng) {
-                this.schedule = Some((*t, this.rng.gen_range(1, 100)));
-            }
-        }
-        this.schedule.take().map(|(t, c)| {
-            if c > 0 {
-                this.schedule = Some((t, c - 1));
-            }
-            t
-        })
-    }
-    pub fn yield_scheduler(&self) {
-        self.0.borrow_mut().schedule = None;
-    }
     pub fn step(&self) -> bool {
         timer!("Process::step");
-        if let Some(threadid) = self.schedule() {
-            let thread = self.0.borrow().threads.get(&threadid).unwrap().clone();
+        let thread = self.0.borrow_mut().scheduler.schedule();
+        if let Some(thread) = thread {
             if !thread.step() {
-                self.0.borrow_mut().threads.remove(&threadid);
+                self.0.borrow_mut().scheduler.remove_thread(&thread.threadid());
             }
             true
         } else {
@@ -217,7 +178,17 @@ impl Process {
     }
 
     pub fn thread(&self, id: ThreadId) -> Option<Thread> {
-        self.0.borrow().threads.get(&id).cloned()
+        self.0.borrow().scheduler.thread(&id)
+    }
+
+    pub fn add_thread(&self, fun: &Value, params: &[Value]) -> ThreadId {
+        let threadid = self.0.borrow_mut().scheduler.new_threadid();
+        let thread = Thread::new(self.clone(), threadid, fun, params);
+        self.0.borrow_mut().scheduler.add_thread(thread);
+        threadid
+    }
+    pub fn scheduler(&self)->Scheduler{
+        self.0.borrow().scheduler.clone()
     }
 }
 
@@ -225,14 +196,14 @@ impl Process {
 impl Debug for Process {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Process")
-            .field("threads", &self.0.borrow().threads)
+            .field("scheduler", &self.0.borrow().scheduler)
             .finish()
     }
 }
 
 impl Drop for ProcessScope {
     fn drop(&mut self) {
-        let mut this = self.0.0.borrow_mut();
-        this.threads.clear();
+        let this = self.0.0.borrow_mut();
+        this.scheduler.cancel();
     }
 }

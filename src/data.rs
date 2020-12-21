@@ -33,6 +33,7 @@ pub struct DataFlowInner {
     seq: usize,
     freelist: FreeList<ThunkInner>,
     thunks: VecDeque<Thunk>,
+    tracing: bool,
 }
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ pub struct ThunkInner {
     ordering: Option<MemoryOrdering>,
     backtrace: Backtrace,
     value: RefCell<ThunkState>,
+    tracing: bool,
 }
 
 pub type ThunkDeps = SmallVec<[Thunk; 4]>;
@@ -92,6 +94,7 @@ impl Thunk {
             ordering: None,
             backtrace: Backtrace::empty(),
             value: RefCell::new(ThunkState::Ready(value)),
+            tracing: false,
         }))
     }
 }
@@ -158,6 +161,7 @@ impl DataFlow {
             seq: 0,
             freelist: FreeList::new(),
             thunks: VecDeque::new(),
+            tracing: false,
         })))
     }
     pub async fn thunk_impl(
@@ -173,6 +177,9 @@ impl DataFlow {
         let mut this = self.0.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
+        if this.tracing {
+            println!("{:?} {:?} {:?}", this.threadid, this.seq, backtrace.iter().next().unwrap());
+        }
         let thunk: Thunk = Thunk(this.freelist.alloc(ThunkInner {
             process: this.process.clone(),
             threadid: this.threadid,
@@ -182,6 +189,7 @@ impl DataFlow {
             ordering,
             backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
+            tracing: this.tracing,
         }));
         this.thunks.push_back(thunk.clone());
         thunk
@@ -279,6 +287,12 @@ impl DataFlow {
         } else {
             false
         }
+    }
+    pub fn set_tracing(&self, tracing: bool) {
+        self.0.borrow_mut().tracing = tracing;
+    }
+    pub fn tracing(&self) -> bool {
+        self.0.borrow().tracing
     }
     pub fn threadid(&self) -> ThreadId { self.0.borrow().threadid }
 }

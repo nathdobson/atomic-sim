@@ -94,6 +94,9 @@ impl Thread {
             ptr.as_u64()
         })
     }
+    pub fn threadid(&self) -> ThreadId {
+        self.0.threadid
+    }
 }
 
 impl Debug for ThreadId {

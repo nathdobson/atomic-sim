@@ -24,6 +24,7 @@ mod libc;
 mod apple;
 mod rust;
 mod unwind;
+mod internal;
 
 #[derive(Debug)]
 struct Addr(u64);
@@ -404,6 +405,7 @@ pub fn builtins() -> Vec<Rc<dyn Func>> {
     result.extend(apple::builtins());
     result.extend(rust::builtins());
     result.extend(unwind::builtins());
+    result.extend(internal::builtins());
     result
 }
 

@@ -109,6 +109,9 @@ impl InterpFrame {
         }
     }
     async fn decode_instr(&mut self, ctx: &InterpCtx, instr: &CInstr) -> Result<(), Panic> {
+        if ctx.flow.data().tracing() {
+            //println!("{} {} {:?}", ctx.flow.data().threadid().0, ctx.flow.data().seq(), instr);
+        }
         match instr {
             CInstr::Compute(compute) => {
                 let deps = self.decode_operands(ctx, compute.operands.iter()).await;
@@ -177,7 +180,7 @@ impl InterpFrame {
                 let address = self.decode_operand(ctx, &atomicrmw.address).await;
                 let value = self.decode_operand(ctx, &atomicrmw.value).await;
                 let atomicrmw = atomicrmw.clone();
-                let dest=atomicrmw.dest;
+                let dest = atomicrmw.dest;
                 let result = ctx.flow.atomicrmw(
                     atomicrmw.value.class().clone(),
                     address,
@@ -197,6 +200,9 @@ impl InterpFrame {
         Ok(())
     }
     async fn decode_term(&mut self, ctx: &InterpCtx, term: &CTerm) -> Result<DecodeResult, Panic> {
+        if ctx.flow.data().tracing() {
+            //println!("{} {} {:?}", ctx.flow.data().threadid().0, ctx.flow.data().seq(), term);
+        }
         Ok(match term {
             CTerm::Ret(ret) => {
                 DecodeResult::Return(self.decode_operand(ctx, &ret.return_operand).await)
