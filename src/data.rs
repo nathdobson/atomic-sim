@@ -24,6 +24,7 @@ use smallvec::SmallVec;
 use smallvec::smallvec;
 use crate::util::rangemap::RangeMap;
 use crate::util::freelist::{FreeList, Frc};
+use itertools::Itertools;
 
 const PIPELINE_SIZE: usize = 1000;
 
@@ -113,24 +114,31 @@ impl Thunk {
             _ => unreachable!()
         }
     }
-    pub fn step<'a>(&'a self, comp: &ComputeCtx) -> bool {
+    pub fn step<'a>(&'a self, comp: &ComputeCtx) {
         let args = self.0.deps.iter().map(|d| d.try_get().unwrap()).collect::<Vec<_>>();
         match &*self.0.value.borrow() {
             ThunkState::Ready(_) => panic!("Already ready"),
             ThunkState::Pending(_) => {}
             _ => unreachable!(),
         }
-        let mut r = self.0.value.borrow_mut();
-        match mem::replace(&mut *r, ThunkState::Sandbag) {
-            ThunkState::Pending(compute) => {
-                let v = compute(comp, args.as_slice());
-                *r = ThunkState::Ready(v);
-                mem::drop(r);
-            }
-            ThunkState::Ready(_) => panic!("Stepping ready thunk."),
-            _ => unreachable!(),
+        if self.0.tracing {
+            print!("res {:10} = ", format!("{:?}", self));
         }
-        true
+        {
+            let mut r = self.0.value.borrow_mut();
+            match mem::replace(&mut *r, ThunkState::Sandbag) {
+                ThunkState::Pending(compute) => {
+                    let v = compute(comp, args.as_slice());
+                    *r = ThunkState::Ready(v);
+                    mem::drop(r);
+                }
+                ThunkState::Ready(_) => panic!("Stepping ready thunk."),
+                _ => unreachable!(),
+            }
+        }
+        if self.0.tracing {
+            println!("{:?}", self);
+        }
     }
     pub fn all_deps(&self) -> Vec<&Thunk> {
         let mut frontier: Vec<&Thunk> = vec![self];
@@ -177,9 +185,6 @@ impl DataFlow {
         let mut this = self.0.borrow_mut();
         let seq = this.seq;
         this.seq += 1;
-        if this.tracing {
-            println!("{:?} {:?} {:?}", this.threadid, this.seq, backtrace.iter().next().unwrap());
-        }
         let thunk: Thunk = Thunk(this.freelist.alloc(ThunkInner {
             process: this.process.clone(),
             threadid: this.threadid,
@@ -192,6 +197,16 @@ impl DataFlow {
             tracing: this.tracing,
         }));
         this.thunks.push_back(thunk.clone());
+        if this.tracing {
+            let id = format!("{:?}", thunk);
+            let deps = thunk.0.deps.iter().map(|x| format!("{:?}", x)).join(", ");
+            let loc = thunk.0.backtrace.iter().next().unwrap().loc();
+            let address = thunk.0.address.as_ref().map(|(t, l)| format!("{:?}", t)).unwrap_or_default();
+            let layout = thunk.0.address.as_ref().map(|(t, l)| format!("{:?}", l)).unwrap_or_default();
+            let order = thunk.0.ordering.as_ref().map(|o| format!("{:?}", o)).unwrap_or_default();
+            println!("dec {:10} = [{:40} >= {:60}] {:20} {:10} {:10}",
+                     id, deps, loc, address, layout, order);
+        }
         thunk
     }
     pub async fn thunk(
@@ -316,13 +331,19 @@ impl<'a> Debug for DebugDeps<'a> {
 
 impl Debug for Thunk {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}_{} = {:?} [{:?}] {:?}",
-               self.0.threadid,
-               self.0.seq,
-               self.0.value.borrow(),
-               self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>(),
-               self.0.backtrace.iter().next(),
-        )
+        if let Some(value) = self.try_get() {
+            write!(f, "{:?}", value)
+        } else {
+            write!(f, "{:?}#{:?}", self.0.threadid, self.0.seq)
+        }
+
+        // write!(f, "{:?}_{} = {:?} [{:?}] {:?}",
+        //        self.0.threadid,
+        //        self.0.seq,
+        //        self.0.value.borrow(),
+        //        self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>(),
+        //        self.0.backtrace.iter().next(),
+        // )
     }
 }
 

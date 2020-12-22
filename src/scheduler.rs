@@ -81,7 +81,7 @@ impl Scheduler {
         }
         if this.active_thread.is_none() {
             if let Some(t) = this.runnable_threads.iter().choose(&mut this.rng) {
-                this.active_thread = Some((*t, this.rng.gen_range(1, 100)));
+                this.active_thread = Some((*t, this.rng.gen_range(1, 10)));
             }
         }
         this.active_thread.take().map(|(t, c)| {
