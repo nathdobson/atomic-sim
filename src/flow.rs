@@ -13,7 +13,8 @@ use crate::function::Panic;
 use crate::compile::expr::CExpr;
 use crate::thread::{Thread, ThreadId};
 use crate::compile::class::Class;
-use llvm_ir::instruction::MemoryOrdering;
+use llvm_ir::instruction::{MemoryOrdering};
+use crate::ordering::Ordering;
 
 #[derive(Clone)]
 pub struct FlowCtx {
@@ -71,7 +72,7 @@ impl FlowCtx {
     pub async fn load(&self, address: &Value, layout: Layout) -> Value {
         self.data.load(self.backtrace.clone(),
                        self.data.constant(self.backtrace.clone(),
-                                          address.clone()).await, layout, None).await.await
+                                          address.clone()).await, layout, Ordering::None).await.await
     }
 
     pub async fn store(&self, address: &Value, value: &Value) {
@@ -80,7 +81,7 @@ impl FlowCtx {
             self.data.constant(self.backtrace.clone(), address.clone()).await,
             Layout::from_bytes(value.as_bytes().len() as u64, 1),
             self.data.constant(self.backtrace.clone(), value.clone()).await,
-            None).await.await;
+            Ordering::None).await.await;
     }
 
     pub async fn string(&self, string: &str) -> Value {
@@ -144,25 +145,9 @@ impl FlowCtx {
         address: Thunk,
         expected: Thunk,
         replacement: Thunk,
-        success: MemoryOrdering,
-        failure: MemoryOrdering,
+        success: Ordering,
+        failure: Ordering,
     ) -> Thunk {
-        use MemoryOrdering::*;
-        let union = match (failure, success) {
-            (SequentiallyConsistent, _) | (_, SequentiallyConsistent) =>
-                SequentiallyConsistent,
-            (AcquireRelease, _) | (_, AcquireRelease) | (Acquire, Release) | (Release, Acquire) =>
-                AcquireRelease,
-            (Acquire, _) | (_, Acquire) =>
-                Acquire,
-            (Release, _) | (_, Release) =>
-                Release,
-            (Monotonic, _) | (_, Monotonic) =>
-                Monotonic,
-            (Unordered, _) | (_, Unordered) =>
-                Unordered,
-            (NotAtomic, NotAtomic) => NotAtomic,
-        };
         let deps = smallvec![address.clone(), expected, replacement];
         let types = self.process.types();
         let output = types.struc(vec![class.clone(), types.bool()], false);
@@ -170,13 +155,13 @@ impl FlowCtx {
         self.data().thunk_impl(
             self.backtrace().clone(),
             Some((address.clone(), layout)),
-            Some(union),
+            success.union(failure),
             deps, {
                 move |comp, args| {
-                    let current = comp.process.load_impl(comp.threadid, args[0], layout, Some(failure)).clone();
+                    let current = comp.process.load_impl(comp.threadid, args[0], layout, failure).clone();
                     let changed = &current == args[1];
                     if changed {
-                        comp.process.store_impl(comp.threadid, args[0], args[2], Some(success));
+                        comp.process.store_impl(comp.threadid, args[0], args[2], success);
                     }
                     Value::aggregate(&output, vec![current, Value::from(changed)].into_iter())
                 }
@@ -187,8 +172,8 @@ impl FlowCtx {
                              address: &Value,
                              expected: u64,
                              replacement: u64,
-                             success: MemoryOrdering,
-                             failure: MemoryOrdering) -> (u64, bool) {
+                             success: Ordering,
+                             failure: Ordering) -> (u64, bool) {
         let c64 = self.process().types().int(64);
         let c1 = self.process().types().int(1);
         let c64_1 = self.process().types().struc(vec![c64.clone(), c1], false);
@@ -199,8 +184,8 @@ impl FlowCtx {
                                   address.clone(),
                                   expected.clone(),
                                   replacement.clone(),
-                                  MemoryOrdering::Acquire,
-                                  MemoryOrdering::Monotonic).await.await;
+                                  success,
+                                  failure).await.await;
         (output.extract(&c64_1, 0).unwrap_u64(),
          output.extract(&c64_1, 1).unwrap_bool())
     }
@@ -210,7 +195,7 @@ impl FlowCtx {
         class: Class,
         address: Thunk,
         value: Thunk,
-        ordering: MemoryOrdering,
+        atomicity: Ordering,
         oper: impl FnOnce(&Value, &Value) -> Value + 'static,
     ) -> Thunk {
         let deps = smallvec![address.clone(), value];
@@ -218,12 +203,12 @@ impl FlowCtx {
         self.data().thunk_impl(
             self.backtrace().clone(),
             Some((address.clone(), layout)),
-            Some(ordering),
+            atomicity,
             deps, {
                 move |comp, args| {
-                    let current = comp.process.load_impl(comp.threadid, args[0], layout, Some(ordering)).clone();
+                    let current = comp.process.load_impl(comp.threadid, args[0], layout, atomicity).clone();
                     let new = oper(&current, &args[1]);
-                    comp.process.store_impl(comp.threadid, args[0], &new, Some(ordering));
+                    comp.process.store_impl(comp.threadid, args[0], &new, atomicity);
                     current
                 }
             }).await

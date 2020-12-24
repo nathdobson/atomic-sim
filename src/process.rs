@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use llvm_ir::{Instruction, Type, Operand, Constant, IntPredicate, Name, Terminator, constant, TypeRef};
-use llvm_ir::instruction::{Atomicity, InsertValue, SExt, ZExt, AtomicRMW, RMWBinOp, Select, Trunc, PtrToInt, ExtractValue, IntToPtr, CmpXchg, MemoryOrdering};
+use llvm_ir::instruction::{InsertValue, SExt, ZExt, AtomicRMW, RMWBinOp, Select, Trunc, PtrToInt, ExtractValue, IntToPtr, CmpXchg, MemoryOrdering};
 use std::ops::{Range, Deref, DerefMut};
 use crate::layout::{Layout, align_to, AggrLayout, Packing};
 use llvm_ir::types::NamedStructDef;
@@ -18,7 +18,7 @@ use std::convert::TryInto;
 use std::panic::UnwindSafe;
 use crate::symbols::{Symbol, SymbolTable};
 use std::time::{Instant, Duration};
-use crate::data::Thunk;
+use crate::data::{Thunk};
 use std::cell::RefCell;
 use crate::function::Func;
 use crate::memory::Memory;
@@ -32,6 +32,10 @@ use crate::symbols::ThreadLocalKey;
 use crate::compile::module::ModuleId;
 use rand::seq::{SliceRandom, IteratorRandom};
 use crate::scheduler::Scheduler;
+use crate::ordering::Ordering;
+use futures::executor::{LocalPool, LocalSpawner};
+use futures::task::{SpawnExt, LocalSpawnExt};
+use crate::compile::function::COperand::Local;
 
 pub struct ProcessInner {
     functions: HashMap<u64, Rc<dyn Func>>,
@@ -42,6 +46,8 @@ pub struct ProcessInner {
     memory: Memory,
     types: TypeMap,
     scheduler: Scheduler,
+    pool: Rc<RefCell<LocalPool>>,
+    spawner: LocalSpawner,
 }
 
 #[derive(Clone)]
@@ -52,6 +58,8 @@ pub struct ProcessScope(Process);
 impl Process {
     pub fn new() -> (Self, ProcessScope) {
         let ptr_bits = 64;
+        let pool=LocalPool::new();
+        let spawner=pool.spawner();
         let result = Process(Rc::new(RefCell::new(ProcessInner {
             functions: HashMap::new(),
             thread_local_inits: HashMap::new(),
@@ -61,6 +69,8 @@ impl Process {
             memory: Memory::new(),
             types: TypeMap::new(ptr_bits),
             scheduler: Scheduler::new(),
+            pool: Rc::new(RefCell::new(pool)),
+            spawner
         })));
         (result.clone(), ProcessScope(result))
     }
@@ -78,14 +88,28 @@ impl Process {
     }
     pub fn step(&self) -> bool {
         timer!("Process::step");
-        let thread = self.0.borrow_mut().scheduler.schedule();
-        if let Some(thread) = thread {
-            if !thread.step() {
-                self.0.borrow_mut().scheduler.remove_thread(&thread.threadid());
+        let pool = self.0.borrow().pool.clone();
+        let mut resolvable;
+        loop {
+            resolvable = vec![];
+            println!("Decoding... \n{:#?}", self.0.borrow().scheduler);
+            pool.borrow_mut().run_until_stalled();
+            let threads = self.0.borrow().scheduler.threads();
+            let mut progress = false;
+            println!("Stepping... \n{:#?}", self.0.borrow().scheduler);
+            for thread in threads {
+                progress |= thread.step_pure(&mut resolvable);
             }
+            if !progress { break; }
+        }
+        println!("resolvable = {:?}", resolvable);
+        if resolvable.len() == 0 {
+            panic!("no progress to be made");
+        } else if resolvable.len() == 1 {
+            assert!(resolvable[0].step());
             true
         } else {
-            false
+            panic!("No more available progress. {:#?}", self.0.borrow().scheduler);
         }
     }
     pub fn free(&self, tid: ThreadId, ptr: &Value) {
@@ -94,10 +118,10 @@ impl Process {
     pub fn alloc(&self, tid: ThreadId, layout: Layout) -> Value {
         self.0.borrow_mut().memory.alloc(layout)
     }
-    pub fn store_impl(&self, threadid: ThreadId, ptr: &Value, value: &Value, atomicity: Option<MemoryOrdering>) {
+    pub fn store_impl(&self, threadid: ThreadId, ptr: &Value, value: &Value, atomicity: Ordering) {
         self.0.borrow_mut().memory.store_impl(threadid, ptr, value, atomicity);
     }
-    pub fn load_impl(&self, threadid: ThreadId, ptr: &Value, layout: Layout, atomicity: Option<MemoryOrdering>) -> Value {
+    pub fn load_impl(&self, threadid: ThreadId, ptr: &Value, layout: Layout, atomicity: Ordering) -> Value {
         self.0.borrow_mut().memory.load_impl(ptr, layout, atomicity)
     }
     pub fn debug_info(&self, ptr: &Value) -> String {
@@ -178,16 +202,17 @@ impl Process {
     }
 
     pub fn thread(&self, id: ThreadId) -> Option<Thread> {
-        self.0.borrow().scheduler.thread(&id)
+        self.0.borrow().scheduler.thread(id)
     }
 
     pub fn add_thread(&self, fun: &Value, params: &[Value]) -> ThreadId {
         let threadid = self.0.borrow_mut().scheduler.new_threadid();
-        let thread = Thread::new(self.clone(), threadid, fun, params);
+        let (thread, fut) = Thread::new(self.clone(), threadid, fun, params);
+        self.0.borrow_mut().spawner.spawn_local(fut).unwrap();
         self.0.borrow_mut().scheduler.add_thread(thread);
         threadid
     }
-    pub fn scheduler(&self)->Scheduler{
+    pub fn scheduler(&self) -> Scheduler {
         self.0.borrow().scheduler.clone()
     }
 }

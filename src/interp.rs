@@ -20,6 +20,7 @@ use smallvec::SmallVec;
 use smallvec::smallvec;
 use crate::async_timer;
 use crate::compile::function::{COperand, CInstr, CTerm, CBlockId, CFunc, CLocal};
+use crate::ordering::Ordering;
 
 pub struct InterpFrame {
     origin: Option<CBlockId>,
@@ -153,7 +154,7 @@ impl InterpFrame {
                         ctx.flow.backtrace().clone(),
                         address,
                         load.address.class().target().layout(),
-                        load.atomicity.clone()).await;
+                        load.atomicity).await;
                 self.assign(load.dest, result);
             }
             CInstr::Store(store) => {
@@ -165,7 +166,7 @@ impl InterpFrame {
                     address,
                     layout,
                     value,
-                    store.atomicity.clone()).await;
+                    store.atomicity).await;
             }
             CInstr::CmpXchg(cmpxchg) => {
                 let address = self.decode_operand(ctx, &cmpxchg.address).await;
@@ -173,7 +174,7 @@ impl InterpFrame {
                 let replacement = self.decode_operand(ctx, &cmpxchg.replacement).await;
                 let class = cmpxchg.expected.class();
                 let result =
-                    ctx.flow.cmpxchg(class, address, expected, replacement, cmpxchg.success, cmpxchg.failure).await;
+                    ctx.flow.cmpxchg(class, address, expected, replacement, Ordering::from(cmpxchg.success), Ordering::from(cmpxchg.failure)).await;
                 self.assign(cmpxchg.dest, result);
             }
             CInstr::AtomicRMW(atomicrmw) => {
@@ -185,7 +186,7 @@ impl InterpFrame {
                     atomicrmw.value.class().clone(),
                     address,
                     value,
-                    atomicrmw.atomicity.mem_ordering,
+                    Ordering::from(atomicrmw.atomicity),
                     move |current, operand| {
                         atomicrmw.operation.call_operation(&[&current, &operand])
                     }).await;

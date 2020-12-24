@@ -14,6 +14,7 @@ use crate::value::Value;
 use crate::thread::ThreadId;
 use crate::compile::function::COperand;
 use crate::compile::function::FuncCompiler;
+use crate::ordering::Ordering;
 
 pub struct Compiler {
     process: Process,
@@ -134,7 +135,7 @@ impl Compiler {
                         ThreadId(0),
                         &self.process.value_from_address(addr),
                         &value,
-                        None),
+                        Ordering::None),
                 SymbolDef::ThreadLocal(key) => {
                     self.process.add_thread_local_init(key, layout, value);
                 }

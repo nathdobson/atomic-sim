@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::value::Value;
 use llvm_ir::{Name, TypeRef};
 use crate::layout::{Layout, align_to};
-use llvm_ir::instruction::{Atomicity, MemoryOrdering};
+use llvm_ir::instruction::{MemoryOrdering};
 use std::ops::Range;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
@@ -13,6 +13,7 @@ use crate::thread::ThreadId;
 use std::rc::Rc;
 use crate::util::rangemap::RangeMap;
 use crate::util::by_address::ByAddress;
+use crate::ordering::Ordering;
 
 #[derive(Debug)]
 struct LogInner {
@@ -49,7 +50,7 @@ impl Memory {
         self.next = result + len + HEAP_GUARD;
         Value::from(result)
     }
-    pub fn store_impl(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, ordering: Option<MemoryOrdering>) {
+    pub fn store_impl(&mut self, threadid: ThreadId, ptr: &Value, value: &Value, ordering: Ordering) {
         //println!("Store *{:?} = {:?}", ptr, value);
         let start = ptr.as_u64();
         let value = value.as_bytes().to_vec();
@@ -62,8 +63,7 @@ impl Memory {
         let log = Log(ByAddress(Rc::new(LogInner { start, value, pred })));
         self.cells.insert(range, log);
     }
-    pub fn load_impl(&mut self, ptr: &Value, layout: Layout, ordering: Option<MemoryOrdering>) -> Value {
-
+    pub fn load_impl(&mut self, ptr: &Value, layout: Layout, ordering: Ordering) -> Value {
         let start = ptr.as_u64();
         let range = start..start + layout.bytes();
         let mut result = Value::zero(layout.bits());

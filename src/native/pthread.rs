@@ -5,8 +5,9 @@ use crate::value::Value;
 use llvm_ir::instruction::MemoryOrdering;
 use crate::native_fn;
 use crate::native::{native_bomb, Addr};
-use crate::thread::ThreadId;
+use crate::thread::{ThreadId, Blocker};
 use crate::util::future::pending_once;
+use crate::ordering::Ordering;
 
 const UNLOCKED: u64 = 0x32AAABA7;
 const LOCKED: u64 = 1;
@@ -16,8 +17,8 @@ async fn mutex_lock_acquire(flow: &FlowCtx, address: &Value) {
         address,
         UNLOCKED,
         LOCKED,
-        MemoryOrdering::Acquire,
-        MemoryOrdering::Monotonic).await);
+        Ordering::Acquire,
+        Ordering::Relaxed).await);
 }
 
 async fn mutex_lock_release(flow: &FlowCtx, address: &Value) {
@@ -25,12 +26,12 @@ async fn mutex_lock_release(flow: &FlowCtx, address: &Value) {
         address,
         LOCKED,
         UNLOCKED,
-        MemoryOrdering::Release,
-        MemoryOrdering::Monotonic).await);
+        Ordering::Release,
+        Ordering::Relaxed).await);
 }
 
 async fn pthread_mutex_trylock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
-    if flow.process().scheduler().mutex_trylock(flow.threadid(), m.as_u64()) {
+    if flow.process().scheduler().mutex(m.as_u64()).try_lock() {
         mutex_lock_acquire(flow, &m).await;
         0
     } else {
@@ -39,17 +40,16 @@ async fn pthread_mutex_trylock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
 }
 
 async fn pthread_mutex_lock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
-    if !flow.process().scheduler().mutex_lock_enter(flow.threadid(), m.as_u64()) {
-        pending_once().await;
-        assert!(flow.process().scheduler().mutex_lock_accept(flow.threadid(), m.as_u64()));
-    }
+    flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Mutex);
+    flow.process().scheduler().mutex(m.as_u64()).lock().await;
+    flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Unknown);
     mutex_lock_acquire(flow, &m).await;
     0
 }
 
 async fn pthread_mutex_unlock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
     mutex_lock_release(flow, &m).await;
-    flow.process().scheduler().mutex_unlock(flow.threadid(), m.as_u64());
+    flow.process().scheduler().mutex(m.as_u64()).unlock();
     0
 }
 
@@ -60,22 +60,23 @@ async fn pthread_mutex_init(flow: &FlowCtx, (m, attr): (Value, Addr)) -> u32 {
 
 async fn pthread_cond_wait(flow: &FlowCtx, (cond, mutex): (Value, Value)) -> u32 {
     mutex_lock_release(flow, &mutex).await;
-    flow.process().scheduler().cond_wait(flow.threadid(), cond.as_u64(), mutex.as_u64());
-    pending_once().await;
+    flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Cond);
+    let scheduler = flow.process().scheduler();
+    scheduler.condvar(cond.as_u64()).wait(scheduler.mutex(mutex.as_u64())).await;
+    flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Unknown);
     mutex_lock_acquire(flow, &mutex).await;
     0
 }
 
 async fn pthread_rwlock_rdlock(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    println!("pthread_rwlock_rdlock({:?})", m);
-    //TODO
-    0
+    panic!("pthread_rwlock_rdlock({:?})", m);
+    //0
 }
 
 async fn pthread_rwlock_unlock(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    println!("pthread_rwlock_unlock({:?})", m);
+    panic!("pthread_rwlock_unlock({:?})", m);
     //TODO
-    0
+    //0
 }
 
 async fn pthread_mutexattr_init(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
@@ -103,13 +104,13 @@ async fn pthread_mutex_destroy(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
 }
 
 async fn pthread_cond_broadcast(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    flow.process().scheduler().cond_notify(flow.threadid(), m.0, None);
-    0
+    todo!();
+    //0
 }
 
 async fn pthread_cond_signal(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    flow.process().scheduler().cond_notify(flow.threadid(), m.0, Some(1));
-    0
+    todo!();
+    //0
 }
 
 async fn pthread_cond_destroy(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {

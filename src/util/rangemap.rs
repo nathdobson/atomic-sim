@@ -89,10 +89,10 @@ impl<K: Ord + Copy, V: Clone> FromIterator<(Range<K>, V)> for RangeMap<K, V> {
 mod test {
     use std::collections::{BTreeMap, HashMap};
     use std::ops::{RangeInclusive, Range};
-    use crate::rangemap::RangeMap;
     use itertools::Itertools;
     use rand_xorshift::XorShiftRng;
     use rand::{SeedableRng, Rng};
+    use crate::util::rangemap::RangeMap;
 
     #[test]
     fn test() {

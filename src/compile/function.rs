@@ -28,6 +28,7 @@ use llvm_ir::module::ThreadLocalMode;
 use crate::compile::expr::CExpr;
 use crate::compile::module::{ModuleId, ModuleCompiler};
 use crate::compile::expr::ExprCompiler;
+use crate::ordering::Ordering;
 
 #[derive(Debug)]
 pub struct CFunc {
@@ -62,14 +63,14 @@ pub struct CBlock {
 pub struct CLoad {
     pub dest: CLocal,
     pub address: COperand,
-    pub atomicity: Option<Atomicity>,
+    pub atomicity: Ordering,
 }
 
 #[derive(Debug)]
 pub struct CStore {
     pub address: COperand,
     pub value: COperand,
-    pub atomicity: Option<Atomicity>,
+    pub atomicity: Ordering,
 }
 
 
@@ -100,7 +101,7 @@ pub struct CAtomicRMW {
     pub address: COperand,
     pub value: COperand,
     pub operation: COperation,
-    pub atomicity: Atomicity,
+    pub atomicity: Ordering,
 }
 
 #[derive(Debug)]
@@ -471,14 +472,14 @@ impl FuncCompiler {
                 CInstr::Load(Rc::new(CLoad {
                     dest: self.compile_local(dest),
                     address: self.compile_operand(address),
-                    atomicity: atomicity.clone(),
+                    atomicity: Ordering::from(atomicity),
                 }))
             }
             Instruction::Store(Store { address, value, volatile, atomicity, alignment, debugloc }) => {
                 CInstr::Store(Rc::new(CStore {
                     address: self.compile_operand(address),
                     value: self.compile_operand(value),
-                    atomicity: atomicity.clone(),
+                    atomicity: Ordering::from(atomicity),
                 }))
             }
             Instruction::CmpXchg(CmpXchg {
@@ -534,7 +535,7 @@ impl FuncCompiler {
                     address,
                     value,
                     operation,
-                    atomicity: atomicity.clone(),
+                    atomicity: Ordering::from(atomicity),
                 }))
             }
             Instruction::Freeze(Freeze { operand, dest, debugloc }) => {

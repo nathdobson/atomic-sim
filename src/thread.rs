@@ -22,14 +22,24 @@ use crate::symbols::{Symbol, ThreadLocalKey};
 use crate::backtrace::Backtrace;
 use crate::flow::FlowCtx;
 use crate::process::{Process};
-use crate::util::future::{LocalBoxFuture, noop_waker};
+use crate::util::future::{LocalBoxFuture, noop_waker, pending_once};
 use crate::async_timer;
 use crate::util::recursor::Recursor;
+use crate::ordering::Ordering;
+
+#[derive(Debug)]
+pub enum Blocker {
+    Unknown,
+    Pipeline,
+    Cond,
+    Mutex,
+    Thunk(Thunk),
+}
 
 pub struct ThreadInner {
     process: Process,
     threadid: ThreadId,
-    control: RefCell<Option<LocalBoxFuture<'static, ()>>>,
+    blocker: RefCell<Blocker>,
     data: DataFlow,
     thread_locals: RefCell<HashMap<ThreadLocalKey, u64>>,
 }
@@ -41,11 +51,11 @@ pub struct Thread(Rc<ThreadInner>);
 pub struct ThreadId(pub usize);
 
 impl Thread {
-    pub fn new(process: Process, threadid: ThreadId, main: &Value, params: &[Value]) -> Self {
+    pub fn new(process: Process, threadid: ThreadId, main: &Value, params: &[Value]) -> (Self, impl Future<Output=()>) {
         let data = DataFlow::new(process.clone(), threadid);
         let main = process.reverse_lookup_fun(&main).unwrap();
         let params = params.to_vec();
-        let control: RefCell<Option<Pin<Box<dyn Future<Output=()>>>>> = RefCell::new(Some(Box::pin({
+        let control = {
             let data = data.clone();
             let process = process.clone();
             let inner = async move {
@@ -60,37 +70,34 @@ impl Thread {
                 let main = recursor.spawn(main);
                 recursor.await;
                 main.await.unwrap();
+                println!("Finished decoding thread");
             };
             async_timer!("Thread::new::control", inner)
-        })));
-        Thread(Rc::new(ThreadInner {
+        };
+        (Thread(Rc::new(ThreadInner {
             process,
             threadid,
-            control,
+            blocker: RefCell::new(Blocker::Unknown),
             data,
             thread_locals: RefCell::new(HashMap::new()),
-        }))
+        })), control)
     }
-    pub fn step(&self) -> bool {
-        let step_control = {
-            let mut control = self.0.control.borrow_mut();
-            if let Some(fut) = &mut *control {
-                if fut.as_mut().poll(&mut Context::from_waker(&noop_waker())).is_ready() {
-                    *control = None;
-                }
-                true
-            } else {
-                false
-            }
-        };
-        let step_data = self.0.data.step();
-        step_control || step_data
+    pub fn set_blocker(&self, blocker: Blocker) {
+        *self.0.blocker.borrow_mut() = blocker;
+    }
+    pub async fn pending_once(&self, blocker: Blocker) {
+        *self.0.blocker.borrow_mut() = blocker;
+        pending_once().await;
+        *self.0.blocker.borrow_mut() = Blocker::Unknown;
+    }
+    pub fn step_pure(&self, resolvable: &mut Vec<Thunk>) -> bool {
+        self.0.data.step_pure(resolvable)
     }
     pub fn thread_local(&self, key: ThreadLocalKey) -> u64 {
         *self.0.thread_locals.borrow_mut().entry(key).or_insert_with(|| {
             let (layout, value) = self.0.process.thread_local_init(key);
             let ptr = self.0.process.alloc(self.0.threadid, layout);
-            self.0.process.store_impl(self.0.threadid, &ptr, &value, None);
+            self.0.process.store_impl(self.0.threadid, &ptr, &value, Ordering::None);
             ptr.as_u64()
         })
     }
@@ -110,6 +117,7 @@ impl Debug for Thread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Thread")
             .field("threadid", &self.0.threadid)
+            .field("blocker", &self.0.blocker)
             .field("data", &self.0.data)
             .finish()
     }

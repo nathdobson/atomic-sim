@@ -6,3 +6,4 @@ pub mod lazy;
 pub mod rangemap;
 pub mod recursor;
 pub mod timer;
+pub mod mutex;

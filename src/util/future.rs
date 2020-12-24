@@ -3,7 +3,7 @@ use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
 use std::pin::Pin;
 use std::ptr::null;
 
-pub fn pending_once() -> impl Future {
+pub fn pending_once() -> impl Future<Output=()> {
     struct Fut(bool);
     impl Future for Fut {
         type Output = ();

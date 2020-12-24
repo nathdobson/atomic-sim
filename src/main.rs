@@ -14,6 +14,7 @@
 #![feature(maybe_uninit_ref)]
 #![feature(thread_local)]
 #![feature(generic_associated_types)]
+#![feature(never_type)]
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code, unused_macros)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
@@ -58,6 +59,7 @@ mod interp;
 mod compile;
 mod util;
 mod scheduler;
+mod ordering;
 
 pub fn main() {
     // use crate::thread::Thread;
