@@ -1,10 +1,11 @@
-use std::ops::{Deref, DerefMut};
 use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
-use std::rc::{Rc, Weak};
-use std::fmt::Display;
-use smallvec::alloc::fmt::Formatter;
 use std::fmt;
+use std::fmt::Display;
+use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
+use std::rc::{Rc, Weak};
+
+use smallvec::alloc::fmt::Formatter;
 
 #[derive(Clone, Debug)]
 pub struct ByAddress<T: Address + ?Sized>(pub T);

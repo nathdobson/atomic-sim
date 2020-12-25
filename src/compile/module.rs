@@ -1,20 +1,22 @@
-use crate::compile::operation::{COperationName, COperation, OperCompiler};
-use crate::process::Process;
-use crate::compile::class::{TypeMap, Class, ClassKind, VectorClass};
-use llvm_ir::{ConstantRef, Module, Name};
-use crate::compile::expr::{CExpr, ExprCompiler};
-use itertools::Itertools;
-use std::rc::Rc;
-use crate::layout::Layout;
-use crate::symbols::{Symbol, SymbolDef};
-use llvm_ir::module::{ThreadLocalMode, Linkage};
-use crate::util::lazy::Lazy;
 use std::collections::HashMap;
-use crate::value::Value;
-use crate::thread::ThreadId;
+use std::rc::Rc;
+
+use itertools::Itertools;
+use llvm_ir::{ConstantRef, Module, Name};
+use llvm_ir::module::{Linkage, ThreadLocalMode};
+
+use crate::compile::class::{Class, ClassKind, TypeMap, VectorClass};
+use crate::compile::expr::{CExpr, ExprCompiler};
 use crate::compile::function::COperand;
 use crate::compile::function::FuncCompiler;
+use crate::compile::operation::{COperation, COperationName, OperCompiler};
+use crate::layout::Layout;
 use crate::ordering::Ordering;
+use crate::process::Process;
+use crate::symbols::{Symbol, SymbolDef};
+use crate::thread::ThreadId;
+use crate::util::lazy::Lazy;
+use crate::value::Value;
 
 pub struct Compiler {
     process: Process,

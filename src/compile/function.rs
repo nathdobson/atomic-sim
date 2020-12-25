@@ -1,34 +1,36 @@
-use llvm_ir::{Function, Module, Name, Instruction, Terminator, Operand, BasicBlock, ConstantRef, Constant, IntPredicate, DebugLoc, HasDebugLoc};
-use std::rc::Rc;
-use llvm_ir::instruction::*;
-use crate::symbols::{Symbol, SymbolTable, SymbolDef};
-use crate::value::{Value, add_u64_i64};
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
-use crate::compile::class::{TypeMap, Class, ClassKind, VectorClass};
-use crate::layout::{Layout, Packing};
-use crate::memory::Memory;
-use crate::process::Process;
-use crate::thread::ThreadId;
-use llvm_ir::constant;
-use llvm_ir::terminator::*;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use either::Either;
 use itertools::Itertools;
-use crate::compile::operation::{COperationName, COperation, CFPPredicate, OperCompiler};
-use crate::compile::operation::CIntPredicate;
+use llvm_ir::{BasicBlock, Constant, ConstantRef, DebugLoc, Function, HasDebugLoc, Instruction, IntPredicate, Module, Name, Operand, Terminator};
+use llvm_ir::constant;
 use llvm_ir::constant::Float;
-use llvm_ir::types::FPType;
-use crate::function::Func;
-use crate::flow::FlowCtx;
-use crate::data::{Thunk, DataFlow, ThunkInner, ThunkState};
-use crate::backtrace::BacktraceFrame;
-use std::cell::RefCell;
-use crate::util::lazy::Lazy;
+use llvm_ir::instruction::*;
 use llvm_ir::module::ThreadLocalMode;
+use llvm_ir::terminator::*;
+use llvm_ir::types::FPType;
+
+use crate::backtrace::BacktraceFrame;
+use crate::compile::class::{Class, ClassKind, TypeMap, VectorClass};
 use crate::compile::expr::CExpr;
-use crate::compile::module::{ModuleId, ModuleCompiler};
 use crate::compile::expr::ExprCompiler;
+use crate::compile::module::{ModuleCompiler, ModuleId};
+use crate::compile::operation::{CFPPredicate, COperation, COperationName, OperCompiler};
+use crate::compile::operation::CIntPredicate;
+use crate::data::{DataFlow, Thunk, ThunkInner, ThunkState};
+use crate::flow::FlowCtx;
+use crate::function::Func;
+use crate::layout::{Layout, Packing};
+use crate::memory::Memory;
 use crate::ordering::Ordering;
+use crate::process::Process;
+use crate::symbols::{Symbol, SymbolDef, SymbolTable};
+use crate::thread::ThreadId;
+use crate::util::lazy::Lazy;
+use crate::value::{add_u64_i64, Value};
 
 #[derive(Debug)]
 pub struct CFunc {

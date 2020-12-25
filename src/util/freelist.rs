@@ -1,10 +1,10 @@
-use std::rc::Rc;
+use std::{mem, ptr};
 use std::cell::RefCell;
-use std::ptr::NonNull;
 use std::marker::PhantomData;
-use std::{ptr, mem};
 use std::mem::MaybeUninit;
 use std::ops::Deref;
+use std::ptr::NonNull;
+use std::rc::Rc;
 
 struct FrcInner<T> {
     refcount: usize,

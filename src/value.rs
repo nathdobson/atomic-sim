@@ -1,16 +1,18 @@
-use std::ops::{Add, Index, IndexMut, BitXor, Rem, Mul, Sub, BitAnd, Div, Shr, Shl, BitOr, Range, RangeFull, RangeTo, RangeFrom};
-use std::mem::size_of;
-use std::cmp::Ordering;
-use crate::layout::{Layout, AggrLayout, Packing};
-use std::fmt::{Debug, Formatter};
 use std::{fmt, iter};
-use llvm_ir::{TypeRef, IntPredicate};
-use bitvec::vec::BitVec;
+use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter};
+use std::mem::size_of;
+use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Index, IndexMut, Mul, Range, RangeFrom, RangeFull, RangeTo, Rem, Shl, Shr, Sub};
+
 use bitvec::field::BitField;
 use bitvec::order::Lsb0;
-use crate::compile::class::Class;
 use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
+use llvm_ir::{IntPredicate, TypeRef};
 use smallvec::SmallVec;
+
+use crate::compile::class::Class;
+use crate::layout::{AggrLayout, Layout, Packing};
 use crate::timer;
 
 type Impl = SmallVec<[u8; 16]>;

@@ -18,21 +18,23 @@
 #![allow(unused_imports, unused_variables, incomplete_features, non_snake_case, dead_code, unused_macros)]
 #![deny(unused_must_use, unconditional_recursion, private_in_public)]
 
-#[global_allocator]
-static GLOBAL: crate::util::allocator::Allocator = crate::util::allocator::Allocator;
-
-use llvm_ir::Module;
-use std::{fs, panic, mem};
-use std::ffi::OsStr;
-use std::rc::Rc;
+use std::{fs, mem, panic};
 use std::borrow::Cow;
-use crate::symbols::{SymbolTable, Symbol};
-use crate::process::Process;
+use std::ffi::OsStr;
 use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
 use std::thread::spawn;
 use std::time::Instant;
-use crate::util::timer::dump_trace;
+
+use llvm_ir::Module;
+
 use crate::compile::module::Compiler;
+use crate::process::Process;
+use crate::symbols::{Symbol, SymbolTable};
+use crate::util::timer::dump_trace;
+
+#[global_allocator]
+static GLOBAL: crate::util::allocator::Allocator = crate::util::allocator::Allocator;
 
 mod layout;
 mod value;

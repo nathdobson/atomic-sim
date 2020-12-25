@@ -1,33 +1,35 @@
-use crate::value::Value;
-use std::fmt::{Formatter, Debug};
-use std::{fmt, mem, iter, thread, cmp};
-use std::collections::{HashMap, BTreeMap, HashSet, BTreeSet};
-use std::rc::Rc;
-use std::cell::{RefCell, Ref};
-use llvm_ir::instruction::{MemoryOrdering, Atomicity};
-use crate::layout::Layout;
-use std::future::{Future, Ready};
-use std::pin::Pin;
+use std::{cmp, fmt, iter, mem, thread};
 use std::any::type_name_of_val;
+use std::cell::{Ref, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::{Debug, Formatter};
+use std::future::{Future, Ready};
 use std::hash::{Hash, Hasher};
-use defer::defer;
-use crate::backtrace::Backtrace;
-use crate::process::Process;
-use crate::thread::{Thread, ThreadId};
 use std::ops::Deref;
-use std::task::{Poll, Context, Waker};
-use crate::util::future::pending_once;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+
+use defer::defer;
+use indexmap::set::IndexSet;
+use itertools::Itertools;
+use llvm_ir::instruction::{Atomicity, MemoryOrdering};
 use smallvec::alloc::collections::VecDeque;
-use crate::timer;
 use smallvec::SmallVec;
 use smallvec::smallvec;
-use crate::util::rangemap::RangeMap;
-use crate::util::freelist::{FreeList, Frc};
-use itertools::Itertools;
-use crate::util::by_address::ByAddress;
-use indexmap::set::IndexSet;
+
+use crate::backtrace::Backtrace;
+use crate::layout::Layout;
 use crate::ordering::Ordering;
+use crate::process::Process;
+use crate::thread::{Thread, ThreadId};
 use crate::thread::Blocker;
+use crate::timer;
+use crate::util::by_address::ByAddress;
+use crate::util::freelist::{Frc, FreeList};
+use crate::util::future::pending_once;
+use crate::util::rangemap::RangeMap;
+use crate::value::Value;
 
 const PIPELINE_SIZE: usize = 1000;
 

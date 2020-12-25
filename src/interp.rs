@@ -1,26 +1,28 @@
-use llvm_ir::{Function, BasicBlock, Name, Instruction, IntPredicate, Terminator, Operand, DebugLoc, Type, HasDebugLoc, TypeRef};
-use std::collections::HashMap;
-use crate::function::{Func, Panic};
-use crate::data::{Thunk, ComputeCtx, ThunkDeps};
-use std::rc::Rc;
-use llvm_ir::instruction::{RMWBinOp, Sub, Mul, UDiv, SDiv, URem, SRem, Add, And, Or, Shl, LShr, AShr, ICmp, Xor, SExt, ZExt, Trunc, PtrToInt, IntToPtr, BitCast, InsertValue, AtomicRMW, Select, ExtractValue, CmpXchg, Fence, InlineAssembly, ExtractElement, InsertElement, ShuffleVector};
-use either::Either;
 use std::{fmt, iter};
-use crate::value::{Value, add_u64_i64};
-use llvm_ir::function::ParameterAttribute;
+use std::collections::HashMap;
 use std::fmt::Debug;
-use crate::backtrace::{Backtrace, BacktraceFrame};
-use crate::flow::FlowCtx;
-use crate::symbols::Symbol;
-use crate::layout::{AggrLayout, Layout, Packing};
-use vec_map::VecMap;
+use std::rc::Rc;
+
+use either::Either;
 use itertools::Itertools;
-use crate::timer;
+use llvm_ir::{BasicBlock, DebugLoc, Function, HasDebugLoc, Instruction, IntPredicate, Name, Operand, Terminator, Type, TypeRef};
+use llvm_ir::function::ParameterAttribute;
+use llvm_ir::instruction::{Add, And, AShr, AtomicRMW, BitCast, CmpXchg, ExtractElement, ExtractValue, Fence, ICmp, InlineAssembly, InsertElement, InsertValue, IntToPtr, LShr, Mul, Or, PtrToInt, RMWBinOp, SDiv, Select, SExt, Shl, ShuffleVector, SRem, Sub, Trunc, UDiv, URem, Xor, ZExt};
 use smallvec::SmallVec;
 use smallvec::smallvec;
+use vec_map::VecMap;
+
 use crate::async_timer;
-use crate::compile::function::{COperand, CInstr, CTerm, CBlockId, CFunc, CLocal};
+use crate::backtrace::{Backtrace, BacktraceFrame};
+use crate::compile::function::{CBlockId, CFunc, CInstr, CLocal, COperand, CTerm};
+use crate::data::{ComputeCtx, Thunk, ThunkDeps};
+use crate::flow::FlowCtx;
+use crate::function::{Func, Panic};
+use crate::layout::{AggrLayout, Layout, Packing};
 use crate::ordering::Ordering;
+use crate::symbols::Symbol;
+use crate::timer;
+use crate::value::{add_u64_i64, Value};
 
 pub struct InterpFrame {
     origin: Option<CBlockId>,

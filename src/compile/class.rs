@@ -1,20 +1,22 @@
-use crate::layout::{Layout, AggrLayout, Packing};
-use std::collections::HashMap;
-use std::lazy::OnceCell;
+use std::any::Any;
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use std::collections::hash_map::Entry;
 use std::hash::{Hash, Hasher};
+use std::lazy::OnceCell;
 use std::rc::{Rc, Weak};
-use llvm_ir::types::{FPType, Types, NamedStructDef};
-use llvm_ir::constant::Constant::Int;
-use llvm_ir::{TypeRef, Type, Module};
-use crate::util::lazy::{Lazy, RecursiveError};
+
 use itertools::Itertools;
-use std::any::Any;
+use llvm_ir::{Module, Type, TypeRef};
+use llvm_ir::constant::Constant::Int;
+use llvm_ir::types::{FPType, NamedStructDef, Types};
+
+use crate::layout::{AggrLayout, Layout, Packing};
 use crate::util::by_address::ByAddress;
+use crate::util::lazy::{Lazy, RecursiveError};
 
 #[derive(Clone, Eq, PartialOrd, PartialEq, Ord, Hash, Debug)]
 pub struct Element {

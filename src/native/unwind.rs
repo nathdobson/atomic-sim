@@ -1,11 +1,12 @@
-use crate::function::{Func, Panic};
 use std::rc::Rc;
+
+use crate::data::Thunk;
+use crate::flow::FlowCtx;
+use crate::function::{Func, Panic};
+use crate::native::Addr;
+use crate::native_fn;
 use crate::util::future::FutureExt;
 use crate::value::Value;
-use crate::flow::FlowCtx;
-use crate::native::Addr;
-use crate::data::Thunk;
-use crate::native_fn;
 
 async fn _Unwind_RaiseException(flow: &FlowCtx, (object, ): (Addr, )) -> Result<Thunk, Panic> {
     Err(Panic)

@@ -1,13 +1,14 @@
 use std::rc::Rc;
-use crate::function::{Func};
-use crate::layout::Layout;
-use crate::value::Value;
-use crate::util::future::FutureExt;
-use crate::native::{native_bomb, Addr};
+
 use crate::data::ComputeCtx;
 use crate::flow::FlowCtx;
-use crate::native_fn;
+use crate::function::Func;
+use crate::layout::Layout;
+use crate::native::{Addr, native_bomb};
 use crate::native_comp;
+use crate::native_fn;
+use crate::util::future::FutureExt;
+use crate::value::Value;
 
 fn __rust_alloc(comp: &ComputeCtx, (Addr(len), Addr(align)): (Addr, Addr)) -> Addr {
     Addr(comp.process.memory.alloc(comp.threadid, Layout::from_bytes(len, align)))

@@ -1,31 +1,33 @@
-use llvm_ir::{Module, Instruction, Terminator, Function, Name, BasicBlock, Operand, ConstantRef, Constant, TypeRef, Type, HasDebugLoc, IntPredicate};
-use llvm_ir::instruction::{Call, InlineAssembly, Phi, Alloca, Store, Load, Xor, SExt, BitCast, InsertValue, ZExt, AtomicRMW, Trunc, Select, PtrToInt, Sub, Or, And, IntToPtr, UDiv, SDiv, URem, SRem, Shl, LShr, AShr, ExtractValue, Mul, CmpXchg, Fence, MemoryOrdering, RMWBinOp};
-use std::collections::{HashMap, BTreeMap};
-use std::rc::Rc;
-use std::fmt::{Debug, Formatter, Display};
 use std::{fmt, iter, mem, ops};
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Debug, Display, Formatter};
+use std::future::Future;
+use std::mem::size_of;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll};
+
 use either::Either;
-use std::cell::{Cell, RefCell, Ref};
+use llvm_ir::{BasicBlock, Constant, ConstantRef, Function, HasDebugLoc, Instruction, IntPredicate, Module, Name, Operand, Terminator, Type, TypeRef};
+use llvm_ir::constant::Constant::Undef;
+use llvm_ir::function::ParameterAttribute;
+use llvm_ir::instruction::{Alloca, And, AShr, AtomicRMW, BitCast, Call, CmpXchg, ExtractValue, Fence, InlineAssembly, InsertValue, IntToPtr, Load, LShr, MemoryOrdering, Mul, Or, Phi, PtrToInt, RMWBinOp, SDiv, Select, SExt, Shl, SRem, Store, Sub, Trunc, UDiv, URem, Xor, ZExt};
 use llvm_ir::instruction::Add;
 use llvm_ir::instruction::ICmp;
-use llvm_ir::constant::Constant::Undef;
 use llvm_ir::types::NamedStructDef;
-use llvm_ir::function::ParameterAttribute;
-use std::mem::size_of;
-use crate::value::{Value, add_u64_i64};
-use crate::memory::{Memory};
-use std::future::Future;
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use crate::data::{Thunk, DataFlow};
-use crate::symbols::{Symbol, ThreadLocalKey};
-use crate::backtrace::Backtrace;
-use crate::flow::FlowCtx;
-use crate::process::{Process};
-use crate::util::future::{LocalBoxFuture, noop_waker, pending_once};
+
 use crate::async_timer;
-use crate::util::recursor::Recursor;
+use crate::backtrace::Backtrace;
+use crate::data::{DataFlow, Thunk};
+use crate::flow::FlowCtx;
+use crate::memory::Memory;
 use crate::ordering::Ordering;
+use crate::process::Process;
+use crate::symbols::{Symbol, ThreadLocalKey};
+use crate::util::future::{LocalBoxFuture, noop_waker, pending_once};
+use crate::util::recursor::Recursor;
+use crate::value::{add_u64_i64, Value};
 
 #[derive(Debug)]
 pub enum Blocker {

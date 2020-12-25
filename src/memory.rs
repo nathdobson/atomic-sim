@@ -1,19 +1,21 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::marker::PhantomData;
-use crate::value::Value;
-use llvm_ir::{Name, TypeRef};
-use crate::layout::{Layout, align_to};
-use llvm_ir::instruction::{MemoryOrdering};
-use std::ops::Range;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use llvm_ir::module::Linkage;
-use std::cell::RefCell;
-use crate::thread::ThreadId;
+use std::marker::PhantomData;
+use std::ops::Range;
 use std::rc::Rc;
-use crate::util::rangemap::RangeMap;
-use crate::util::by_address::ByAddress;
+
+use llvm_ir::{Name, TypeRef};
+use llvm_ir::instruction::MemoryOrdering;
+use llvm_ir::module::Linkage;
+
+use crate::layout::{align_to, Layout};
 use crate::ordering::Ordering;
+use crate::thread::ThreadId;
+use crate::util::by_address::ByAddress;
+use crate::util::rangemap::RangeMap;
+use crate::value::Value;
 
 #[derive(Debug)]
 struct LogInner {

@@ -1,20 +1,22 @@
-use crate::memory::Memory;
-use crate::value::Value;
-use std::fmt::{Debug, Formatter, Display};
-use std::fmt;
-use crate::layout::Layout;
-use std::iter::repeat;
-use crate::process::Process;
 use std::cmp::Ordering;
-use crate::data::{Thunk, ComputeCtx};
+use std::fmt::{Debug, Display, Formatter};
+use std::fmt;
+use std::iter::repeat;
 use std::rc::Rc;
-use crate::backtrace::Backtrace;
-use crate::flow::FlowCtx;
+
 use llvm_ir::DebugLoc;
-use crate::interp::InterpFrame;
-use crate::util::future::{LocalBoxFuture, FutureExt};
-use crate::util::lazy::Lazy;
+
+use crate::backtrace::Backtrace;
 use crate::compile::function::CFunc;
+use crate::data::{ComputeCtx, Thunk};
+use crate::flow::FlowCtx;
+use crate::interp::InterpFrame;
+use crate::layout::Layout;
+use crate::memory::Memory;
+use crate::process::Process;
+use crate::util::future::{FutureExt, LocalBoxFuture};
+use crate::util::lazy::Lazy;
+use crate::value::Value;
 
 #[derive(Debug)]
 pub struct Panic;

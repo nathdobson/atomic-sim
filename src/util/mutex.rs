@@ -1,13 +1,14 @@
 use std::cell::RefCell;
-use std::rc::Rc;
-use smallvec::alloc::collections::VecDeque;
-use std::task::Waker;
-use futures::channel::oneshot::{Sender, channel, Canceled};
 use std::mem;
-use futures::executor::{block_on, LocalPool};
-use futures::task::{SpawnExt, LocalSpawnExt};
+use std::rc::Rc;
+use std::task::Waker;
 use std::thread::spawn;
+
+use futures::channel::oneshot::{Canceled, channel, Sender};
+use futures::executor::{block_on, LocalPool};
 use futures::FutureExt;
+use futures::task::{LocalSpawnExt, SpawnExt};
+use smallvec::alloc::collections::VecDeque;
 
 pub struct MutexInner {
     locked: bool,
@@ -98,19 +99,21 @@ impl Condvar {
 
 #[cfg(test)]
 mod test {
+    use std::collections::{HashMap, HashSet};
     use std::future::Future;
+    use std::rc::Rc;
     use std::sync::Mutex as SyncMutex;
+
     use futures::{
         future::FutureExt, // for `.fuse()`
         pin_mut,
         select,
     };
     use futures::executor::LocalPool;
-    use futures::task::{SpawnExt, LocalSpawnExt};
-    use std::collections::{HashMap, HashSet};
-    use std::rc::Rc;
     use futures::future::BoxFuture;
-    use crate::util::mutex::{Mutex, Condvar};
+    use futures::task::{LocalSpawnExt, SpawnExt};
+
+    use crate::util::mutex::{Condvar, Mutex};
 
     struct TesterState {
         next: usize,

@@ -1,22 +1,24 @@
 use std::cmp::Ordering;
-use crate::layout::Layout;
-use crate::value::Value;
-use crate::function::{Func, Panic};
-use crate::data::{Thunk, ComputeCtx, ThunkDeps};
-use std::rc::Rc;
-use std::marker::PhantomData;
-use crate::backtrace::BacktraceFrame;
-use std::convert::{TryInto, TryFrom};
-use crate::flow::FlowCtx;
-use crate::layout::Packing;
-use crate::util::future::{FutureExt, LocalBoxFuture};
-use crate::thread::ThreadId;
-use llvm_ir::instruction::MemoryOrdering;
-use std::future::Future;
-use llvm_ir::DebugLoc;
-use std::fmt::{Formatter, Debug};
+use std::convert::{TryFrom, TryInto};
+use std::fmt::{Debug, Formatter};
 use std::fmt;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+use llvm_ir::DebugLoc;
+use llvm_ir::instruction::MemoryOrdering;
+
+use crate::backtrace::BacktraceFrame;
+use crate::data::{ComputeCtx, Thunk, ThunkDeps};
+use crate::flow::FlowCtx;
+use crate::function::{Func, Panic};
+use crate::layout::Layout;
+use crate::layout::Packing;
 use crate::process::Process;
+use crate::thread::ThreadId;
+use crate::util::future::{FutureExt, LocalBoxFuture};
+use crate::value::Value;
 
 mod llvm;
 mod pthread;

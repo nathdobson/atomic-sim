@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
-use std::ops::{Range, RangeInclusive, Bound, RangeBounds, RangeFrom};
-use std::collections::btree_map;
+use std::{fmt, mem};
 use std::cmp::Ordering;
-use itertools::Itertools;
-use std::{mem, fmt};
+use std::collections::btree_map;
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
+use std::ops::{Bound, Range, RangeBounds, RangeFrom, RangeInclusive};
+
+use itertools::Itertools;
 
 #[derive(Clone)]
 pub struct RangeMap<K: Ord + Copy, V: Clone> {
@@ -88,10 +89,12 @@ impl<K: Ord + Copy, V: Clone> FromIterator<(Range<K>, V)> for RangeMap<K, V> {
 #[cfg(test)]
 mod test {
     use std::collections::{BTreeMap, HashMap};
-    use std::ops::{RangeInclusive, Range};
+    use std::ops::{Range, RangeInclusive};
+
     use itertools::Itertools;
+    use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
-    use rand::{SeedableRng, Rng};
+
     use crate::util::rangemap::RangeMap;
 
     #[test]

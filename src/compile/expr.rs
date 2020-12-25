@@ -1,17 +1,19 @@
-use crate::compile::class::{Class, TypeMap};
-use crate::symbols::{SymbolDef, ThreadLocalKey};
-use crate::value::Value;
-use crate::compile::operation::{COperation, COperationName, OperCompiler};
+use std::iter;
+use std::rc::Rc;
+
 use llvm_ir::{Constant, ConstantRef, Name};
 use llvm_ir::constant;
-use crate::process::Process;
 use llvm_ir::constant::Float;
 use llvm_ir::types::FPType;
-use std::rc::Rc;
-use crate::compile::operation::CIntPredicate;
-use crate::compile::operation::CFPPredicate;
+
+use crate::compile::class::{Class, TypeMap};
 use crate::compile::module::{ModuleCompiler, ModuleId};
-use std::iter;
+use crate::compile::operation::{COperation, COperationName, OperCompiler};
+use crate::compile::operation::CFPPredicate;
+use crate::compile::operation::CIntPredicate;
+use crate::process::Process;
+use crate::symbols::{SymbolDef, ThreadLocalKey};
+use crate::value::Value;
 
 #[derive(Debug)]
 pub enum CExpr {

@@ -1,14 +1,16 @@
-use llvm_ir::{TypeRef, Type, IntPredicate, FPPredicate};
-use crate::value::{Value, add_u64_i64};
-use std::ops::Add;
 use std::iter;
-use crate::layout::{Layout, Packing};
-use crate::compile::class::{Class, ClassKind, VectorClass, TypeMap};
+use std::ops::Add;
+
 use bitvec::vec::BitVec;
-use crate::timer;
-use smallvec::SmallVec;
-use crate::process::Process;
 use itertools::Itertools;
+use llvm_ir::{FPPredicate, IntPredicate, Type, TypeRef};
+use smallvec::SmallVec;
+
+use crate::compile::class::{Class, ClassKind, TypeMap, VectorClass};
+use crate::layout::{Layout, Packing};
+use crate::process::Process;
+use crate::timer;
+use crate::value::{add_u64_i64, Value};
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum CIntPredicate {

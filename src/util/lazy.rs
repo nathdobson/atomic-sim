@@ -1,10 +1,10 @@
+use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
+use std::error::Error;
+use std::fmt::{Debug, Display, Formatter};
+use std::fmt;
 use std::lazy::OnceCell;
 use std::ops::Deref;
-use std::borrow::Borrow;
-use std::error::Error;
-use std::fmt::{Display, Formatter, Debug};
-use std::fmt;
 
 #[derive(Debug, Copy, Clone)]
 pub struct RecursiveError;

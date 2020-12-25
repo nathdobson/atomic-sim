@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, System};
-use smallvec::alloc::alloc::Layout;
 use std::ptr::null_mut;
+
+use smallvec::alloc::alloc::Layout;
 
 const BLOCK_SIZE: usize = 1 << 20;
 const BLOCK_ALIGN: usize = 4096;

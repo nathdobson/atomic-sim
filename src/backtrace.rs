@@ -1,10 +1,12 @@
-use std::rc::Rc;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use crate::value::Value;
 use std::marker::PhantomData;
-use crate::process::Process;
+use std::rc::Rc;
+
 use llvm_ir::DebugLoc;
+
+use crate::process::Process;
+use crate::value::Value;
 
 enum BacktraceInner {
     Nil,

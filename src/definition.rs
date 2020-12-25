@@ -1,12 +1,14 @@
-use crate::layout::Layout;
-use llvm_ir::module::ThreadLocalMode;
-use crate::symbols::{Symbol, ThreadLocalKey};
-use crate::native;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+use llvm_ir::module::ThreadLocalMode;
+
 use crate::function::Func;
+use crate::layout::Layout;
+use crate::native;
+use crate::symbols::{Symbol, ThreadLocalKey};
 use crate::value::Value;
-use std::cell::RefCell;
 
 struct DefinitionsInner {
     functions: HashMap<u64, Rc<dyn Func>>,

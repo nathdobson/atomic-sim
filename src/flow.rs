@@ -1,20 +1,22 @@
-use std::rc::Rc;
-use crate::backtrace::{Backtrace, BacktraceFrame};
-use crate::value::Value;
-use crate::layout::Layout;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use crate::data::{DataFlow, Thunk};
-use crate::process::{Process};
+use std::rc::Rc;
+
 use llvm_ir::DebugLoc;
+use llvm_ir::instruction::MemoryOrdering;
 use smallvec::smallvec;
-use crate::util::recursor::Recursor;
-use crate::function::Panic;
-use crate::compile::expr::CExpr;
-use crate::thread::{Thread, ThreadId};
+
+use crate::backtrace::{Backtrace, BacktraceFrame};
 use crate::compile::class::Class;
-use llvm_ir::instruction::{MemoryOrdering};
+use crate::compile::expr::CExpr;
+use crate::data::{DataFlow, Thunk};
+use crate::function::Panic;
+use crate::layout::Layout;
 use crate::ordering::Ordering;
+use crate::process::Process;
+use crate::thread::{Thread, ThreadId};
+use crate::util::recursor::Recursor;
+use crate::value::Value;
 
 #[derive(Clone)]
 pub struct FlowCtx {

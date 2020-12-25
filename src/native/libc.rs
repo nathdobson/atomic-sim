@@ -1,14 +1,15 @@
-use crate::function::{Func};
-use std::rc::Rc;
-use crate::native::{Addr, native_bomb};
-use crate::flow::FlowCtx;
-use crate::native_fn;
-use crate::native_comp;
-use crate::value::Value;
-use crate::data::ComputeCtx;
 use std::cmp::Ordering;
+use std::rc::Rc;
+
+use crate::data::ComputeCtx;
+use crate::flow::FlowCtx;
+use crate::function::Func;
 use crate::layout::Layout;
+use crate::native::{Addr, native_bomb};
+use crate::native_comp;
+use crate::native_fn;
 use crate::util::future::FutureExt;
+use crate::value::Value;
 
 fn signal(_: &ComputeCtx, _: (u32, Addr)) -> Addr {
     Addr(0)

@@ -1,7 +1,7 @@
 use std::future::Future;
-use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
 use std::pin::Pin;
 use std::ptr::null;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 pub fn pending_once() -> impl Future<Output=()> {
     struct Fut(bool);

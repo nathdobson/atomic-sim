@@ -1,13 +1,15 @@
 use std::rc::Rc;
-use crate::function::{Func};
-use crate::flow::FlowCtx;
-use crate::value::Value;
+
 use llvm_ir::instruction::MemoryOrdering;
+
+use crate::flow::FlowCtx;
+use crate::function::Func;
+use crate::native::{Addr, native_bomb};
 use crate::native_fn;
-use crate::native::{native_bomb, Addr};
-use crate::thread::{ThreadId, Blocker};
-use crate::util::future::pending_once;
 use crate::ordering::Ordering;
+use crate::thread::{Blocker, ThreadId};
+use crate::util::future::pending_once;
+use crate::value::Value;
 
 const UNLOCKED: u64 = 0x32AAABA7;
 const LOCKED: u64 = 1;

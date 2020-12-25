@@ -1,16 +1,18 @@
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use crate::value::Value;
-use crate::layout::Layout;
-use llvm_ir::module::{Linkage, ThreadLocalMode};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
-use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::collections::hash_map::Entry;
-use std::cell::RefCell;
-use crate::memory::Memory;
+
+use llvm_ir::module::{Linkage, ThreadLocalMode};
+
 use crate::compile::module::ModuleId;
+use crate::layout::Layout;
+use crate::memory::Memory;
 use crate::thread::ThreadId;
+use crate::value::Value;
 
 #[derive(Copy, Clone, Debug, Ord, Eq, PartialEq, PartialOrd, Hash)]
 pub struct ThreadLocalKey(usize);

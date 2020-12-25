@@ -1,6 +1,6 @@
-use std::iter::FromIterator;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
+use std::iter::FromIterator;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Layout { bits: u64, bit_align: u64 }

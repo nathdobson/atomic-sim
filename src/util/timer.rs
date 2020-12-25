@@ -1,3 +1,5 @@
+#[cfg(not(feature = "timer"))]
+pub use disabled::*;
 #[cfg(feature = "timer")]
 pub use enabled::*;
 #[cfg(feature = "timer")]
@@ -5,21 +7,19 @@ pub use enabled::Timer;
 #[cfg(feature = "timer")]
 pub use enabled::TimerFuture;
 
-#[cfg(not(feature = "timer"))]
-pub use disabled::*;
-
 #[cfg(feature = "timer")]
 mod enabled {
-    use lazy_static::lazy_static;
-    use std::time::Instant;
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::time::Duration;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
-    use std::future::Future;
     use std::task::{Context, Poll};
-    use std::pin::Pin;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use lazy_static::lazy_static;
 
     lazy_static! {
         pub static ref TOTALS: Mutex<HashMap<&'static str, &'static AtomicU64>> = Mutex::new(HashMap::new());

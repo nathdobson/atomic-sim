@@ -1,11 +1,12 @@
-use std::rc::Rc;
 use std::cell::RefCell;
-use crate::util::future::{LocalBoxFuture, FutureExt};
 use std::future::Future;
-use std::task::{Context, Poll};
+use std::mem;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::mem;
+use std::rc::Rc;
+use std::task::{Context, Poll};
+
+use crate::util::future::{FutureExt, LocalBoxFuture};
 
 struct Frame<T, F: Future<Output=T> + ?Sized> {
     output: Option<T>,

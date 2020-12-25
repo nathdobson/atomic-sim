@@ -1,19 +1,21 @@
-use crate::thread::{ThreadId, Thread};
-use std::collections::{VecDeque, BTreeMap, HashSet, HashMap};
-use crate::process::Process;
-use crate::value::Value;
-use std::fmt::Debug;
-use smallvec::alloc::fmt::Formatter;
-use std::fmt;
-use rand_xorshift::XorShiftRng;
-use rand::seq::IteratorRandom;
-use rand::{Rng, SeedableRng};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::collections::hash_map::Entry;
+use std::fmt;
+use std::fmt::Debug;
 use std::ops::Bound;
 use std::rc::Rc;
-use std::cell::RefCell;
+
 use futures::executor::{LocalPool, LocalSpawner};
-use crate::util::mutex::{Mutex, Condvar};
+use rand::{Rng, SeedableRng};
+use rand::seq::IteratorRandom;
+use rand_xorshift::XorShiftRng;
+use smallvec::alloc::fmt::Formatter;
+
+use crate::process::Process;
+use crate::thread::{Thread, ThreadId};
+use crate::util::mutex::{Condvar, Mutex};
+use crate::value::Value;
 
 #[derive(Debug, Clone)]
 pub struct Scheduler(Rc<RefCell<SchedulerInner>>);
