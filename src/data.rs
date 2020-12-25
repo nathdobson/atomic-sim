@@ -247,7 +247,7 @@ impl DataFlow {
             atomicity,
             smallvec![address, value],
             move |comp, args| {
-                process.store_impl(threadid, args[0], args[1], atomicity);
+                process.memory.store_impl(threadid, args[0].as_u64(), args[1], atomicity);
                 Value::from(())
             }).await
     }
@@ -260,7 +260,7 @@ impl DataFlow {
             atomicity,
             smallvec![address],
             move |comp, args| {
-                process.load_impl(threadid, args[0], layout, atomicity)
+                process.memory.load_impl(threadid, args[0].as_u64(), layout, atomicity)
             }).await
     }
     pub fn len(&self) -> usize {
@@ -269,42 +269,6 @@ impl DataFlow {
     pub fn seq(&self) -> usize {
         self.0.borrow().seq
     }
-    // pub fn pop(&self) -> Option<Thunk> {
-    //     let mut this = self.0.borrow_mut();
-    //     if true {
-    //         return this.thunks.pop_front();
-    //     }
-    //     let mut pending_addresses = RangeMap::<u64, ()>::new();
-    //     let mut pop_index = None;
-    //     for (index, thunk) in this.thunks.iter().enumerate() {
-    //         let available = thunk.0.deps.iter().all(|x| x.try_get().is_some());
-    //         if let Some(address) = &thunk.0.address {
-    //             let layout = address.1;
-    //             let range = if let Some(address) = address.0.try_get() {
-    //                 let address = address.as_u64();
-    //                 address..address + layout.bytes()
-    //             } else {
-    //                 0..u64::max_value()
-    //             };
-    //             let known_first_at_address = pending_addresses.range(range.clone()).next().is_none();
-    //             pending_addresses.insert(range, ());
-    //             if known_first_at_address && available {
-    //                 pop_index = Some(index);
-    //             }
-    //         } else {
-    //             if available {
-    //                 pop_index = Some(index);
-    //                 break;
-    //             }
-    //         }
-    //     }
-    //     if let Some(pop_index) = pop_index {
-    //         this.thunks.remove(pop_index)
-    //     } else {
-    //         assert!(this.thunks.is_empty());
-    //         None
-    //     }
-    // }
     pub fn step_pure(&self, resolvable: &mut Vec<Thunk>) -> bool {
         let comp = self.comp();
         let mut this = self.0.borrow_mut();
@@ -395,14 +359,6 @@ impl Debug for Thunk {
         } else {
             write!(f, "{:?}#{:?}", self.0.threadid, self.0.seq)
         }
-
-        // write!(f, "{:?}_{} = {:?} [{:?}] {:?}",
-        //        self.0.threadid,
-        //        self.0.seq,
-        //        self.0.value.borrow(),
-        //        self.0.deps.iter().map(|dep| dep.0.seq).collect::<Vec<_>>(),
-        //        self.0.backtrace.iter().next(),
-        // )
     }
 }
 

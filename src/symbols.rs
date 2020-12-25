@@ -10,11 +10,14 @@ use std::collections::hash_map::Entry;
 use std::cell::RefCell;
 use crate::memory::Memory;
 use crate::compile::module::ModuleId;
+use crate::thread::ThreadId;
 
 #[derive(Copy, Clone, Debug, Ord, Eq, PartialEq, PartialOrd, Hash)]
 pub struct ThreadLocalKey(usize);
 
-pub struct SymbolTable {
+pub struct SymbolTable(RefCell<SymbolTableInner>);
+
+pub struct SymbolTableInner {
     forward: HashMap<Symbol, SymbolDef>,
     reverse: HashMap<u64, Symbol>,
     next_thread_local_key: usize,
@@ -44,56 +47,61 @@ impl SymbolDef {
 
 impl SymbolTable {
     pub fn new() -> Self {
-        SymbolTable {
+        SymbolTable(RefCell::new(SymbolTableInner {
             forward: HashMap::new(),
             reverse: HashMap::new(),
             next_thread_local_key: 0,
-        }
+        }))
     }
-    pub fn add_symbol(&mut self, memory: &mut Memory, name: Symbol, mode: ThreadLocalMode, layout: Layout) -> SymbolDef {
-        let def = match mode {
-            ThreadLocalMode::NotThreadLocal => {
-                let address = memory.alloc(layout).as_u64();
-                assert!(self.reverse.insert(address, name.clone()).is_none());
-                SymbolDef::Global(address)
-            }
-            _ => {
-                let key = self.next_thread_local_key;
-                self.next_thread_local_key += 1;
-                SymbolDef::ThreadLocal(ThreadLocalKey(key))
-            }
-        };
-        assert!(self.forward.insert(name.clone(), def.clone()).is_none(), "duplicate {:?}", name);
-        def
-    }
-    pub fn add_alias(&mut self, name: Symbol, address: Value) {
-        let def = SymbolDef::Global(address.as_u64());
-        match self.forward.entry(name.clone()) {
+
+    pub fn add_alias(&self, name: Symbol, address: u64) {
+        let mut this = self.0.borrow_mut();
+        let def = SymbolDef::Global(address);
+        match this.forward.entry(name.clone()) {
             Entry::Occupied(occupied) => { assert_eq!(occupied.get(), &def, "{:?}", name); }
             Entry::Vacant(vacant) => { vacant.insert(def); }
         }
     }
-    pub fn reverse_lookup(&self, address: &Value) -> Symbol {
-        self.reverse.get(&address.as_u64()).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
+    pub fn reverse_lookup(&self, address: u64) -> Symbol {
+        let this = self.0.borrow();
+        this.reverse.get(&address).unwrap_or_else(|| panic!("No symbol at {:?}", address)).clone()
     }
-    pub fn try_reverse_lookup(&self, address: &Value) -> Option<Symbol> {
-        self.reverse.get(&address.as_u64()).cloned()
+    pub fn try_reverse_lookup(&self, address: u64) -> Option<Symbol> {
+        let this = self.0.borrow();
+        this.reverse.get(&address).cloned()
     }
     pub fn lookup(&self, module: Option<ModuleId>, name: &str) -> SymbolDef {
+        let this = self.0.borrow();
         if let Some(module) = module {
-            if let Some(internal) = self.forward.get(&Symbol::Internal(module, name.to_string())) {
+            if let Some(internal) = this.forward.get(&Symbol::Internal(module, name.to_string())) {
                 return internal.clone();
             }
         }
-        if let Some(external) = self.forward.get(&Symbol::External(name.to_string())) {
+        if let Some(external) = this.forward.get(&Symbol::External(name.to_string())) {
             external.clone()
         } else {
             println!("No symbol named {:?}", name);
-            self.forward.get(&Symbol::External("explode".to_string())).unwrap().clone()
+            this.forward.get(&Symbol::External("explode".to_string())).unwrap().clone()
         }
     }
     pub fn lookup_symbol(&self, sym: &Symbol) -> SymbolDef {
-        self.forward.get(sym).unwrap_or_else(|| panic!("No symbol {:?}", sym)).clone()
+        let this = self.0.borrow();
+        this.forward.get(sym).unwrap_or_else(|| panic!("No symbol {:?}", sym)).clone()
+    }
+    pub fn add_global(&self, name: &Symbol, address: u64) -> SymbolDef {
+        let mut this = self.0.borrow_mut();
+        let def = SymbolDef::Global(address);
+        assert!(this.forward.insert(name.clone(), def.clone()).is_none(), "duplicate {:?}", name);
+        assert!(this.reverse.insert(address, name.clone()).is_none());
+        def
+    }
+    pub fn add_thread_local(&self, name: &Symbol) -> SymbolDef {
+        let mut this = self.0.borrow_mut();
+        let key = this.next_thread_local_key;
+        this.next_thread_local_key += 1;
+        let def = SymbolDef::ThreadLocal(ThreadLocalKey(key));
+        assert!(this.forward.insert(name.clone(), def.clone()).is_none(), "duplicate {:?}", name);
+        def
     }
 }
 

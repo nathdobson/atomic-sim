@@ -223,7 +223,7 @@ impl FuncCompiler {
             locals: HashMap::new(),
             local_names: vec![],
             block_ids: HashMap::new(),
-            type_map: process.types(),
+            type_map: process.types.clone(),
         }
     }
     fn compile_local(&mut self, name: &Name) -> CLocal {
@@ -690,7 +690,7 @@ impl FuncCompiler {
             }
         }
     }
-    fn compile_block(&mut self, loc: &Value, id: CBlockId, block: &BasicBlock) -> CBlock {
+    fn compile_block(&mut self, loc: u64, id: CBlockId, block: &BasicBlock) -> CBlock {
         let mut phis = vec![];
         let mut instrs = vec![];
         for instr in block.instrs.iter() {
@@ -698,17 +698,17 @@ impl FuncCompiler {
                 Instruction::Phi(phi) => phis.push(self.compile_phi(&phi)),
                 instr => instrs.push(CBlockInstr {
                     instr: self.compile_instr(&instr),
-                    frame: BacktraceFrame::new(loc.as_u64(), format!("{} {:?}", instr, instr.get_debug_loc())),
+                    frame: BacktraceFrame::new(loc, format!("{} {:?}", instr, instr.get_debug_loc())),
                 }),
             }
         }
         let term = CBlockTerm {
             term: self.compile_term(&block.term),
-            frame: BacktraceFrame::new(loc.as_u64(), format!("{} {:?}", block.term, block.term.get_debug_loc())),
+            frame: BacktraceFrame::new(loc, format!("{} {:?}", block.term, block.term.get_debug_loc())),
         };
         CBlock { id, phis, instrs, term }
     }
-    pub fn compile_func(&mut self, loc: &Value, func: &Function) -> CFunc {
+    pub fn compile_func(&mut self, loc: u64, func: &Function) -> CFunc {
         let mut blocks = Vec::with_capacity(func.basic_blocks.len());
         for (i, block) in func.basic_blocks.iter().enumerate() {
             self.block_ids.insert(block.name.clone(), CBlockId(i));
@@ -717,7 +717,7 @@ impl FuncCompiler {
             blocks.push(self.compile_block(loc, CBlockId(i), block));
         }
         CFunc {
-            fp: loc.as_u64(),
+            fp: loc,
             src: func.clone(),
             args: func.parameters.iter().map(|p| self.compile_local(&p.name)).collect(),
             blocks,

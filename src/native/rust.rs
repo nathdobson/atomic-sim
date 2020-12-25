@@ -9,19 +9,18 @@ use crate::flow::FlowCtx;
 use crate::native_fn;
 use crate::native_comp;
 
-fn __rust_alloc(comp: &ComputeCtx, (len, align): (Addr, Addr)) -> Value {
-    comp.process.alloc(comp.threadid, Layout::from_bytes(len.0, align.0))
+fn __rust_alloc(comp: &ComputeCtx, (Addr(len), Addr(align)): (Addr, Addr)) -> Addr {
+    Addr(comp.process.memory.alloc(comp.threadid, Layout::from_bytes(len, align)))
 }
 
-async fn __rust_realloc(flow: &FlowCtx, (ptr, old_size, align, new_size): (Value, Addr, Addr, Addr)) -> Value {
-    flow.realloc(&ptr,
-                 Layout::from_bytes(old_size.0, align.0),
-                 Layout::from_bytes(new_size.0, align.0)).await
+async fn __rust_realloc(flow: &FlowCtx, (Addr(ptr), Addr(old_size), Addr(align), Addr(new_size)): (Addr, Addr, Addr, Addr)) -> Addr {
+    Addr(flow.realloc(ptr,
+                 Layout::from_bytes(old_size, align),
+                 Layout::from_bytes(new_size, align)).await)
 }
 
-async fn __rust_dealloc(flow: &FlowCtx, (ptr, size, align): (Value, Addr, Addr)) -> Value {
-    flow.free(&ptr, Layout::from_bytes(size.0, align.0)).await;
-    Value::from(())
+async fn __rust_dealloc(flow: &FlowCtx, (Addr(ptr), Addr(size), Addr(align)): (Addr, Addr, Addr)) {
+    flow.free(ptr, Layout::from_bytes(size, align)).await;
 }
 
 pub fn builtins() -> Vec<Rc<dyn Func>> {

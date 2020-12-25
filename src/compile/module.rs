@@ -33,7 +33,7 @@ pub struct ModuleCompiler {
 
 impl ModuleCompiler {
     pub fn type_map(&self) -> TypeMap {
-        self.process.types()
+        self.process.types.clone()
     }
     pub fn compile_const(&self, cons: &ConstantRef) -> CExpr {
         self.expr_compiler.compile_const(cons)
@@ -48,7 +48,7 @@ impl Compiler {
         }
     }
     pub fn compile_modules(&mut self, modules: Vec<Module>) {
-        let type_map = self.process.types();
+        let type_map = self.process.types.clone();
         for module in modules.iter() {
             type_map.add_module(module);
         }
@@ -74,7 +74,7 @@ impl Compiler {
                         symbol.clone(),
                         ThreadLocalMode::NotThreadLocal,
                         func_layout);
-                let loc = self.process.value_from_address(loc.global().unwrap());
+                let loc = loc.global().unwrap();
                 func_inits.push((module, loc, func));
             }
             for g in module.src.global_vars.iter() {
@@ -101,7 +101,7 @@ impl Compiler {
                 let name = str_of_name(&g.name);
                 let symbol = Symbol::new(g.linkage, module.moduleid, name);
                 let target = module.compile_const(&g.aliasee);
-                self.process.add_alias(symbol, target.as_const().unwrap().1.clone());
+                self.process.symbols.add_alias(symbol, target.as_const().unwrap().1.as_u64());
             }
         }
         for (module, loc, func) in func_inits {
@@ -111,13 +111,13 @@ impl Compiler {
             let process = self.process.clone();
             let expr_compiler = module.expr_compiler.clone();
             let oper_compiler = self.oper_compiler.clone();
-            self.process.add_func(&loc.clone(),
-                                  Rc::new(Lazy::new(
-                                      move || FuncCompiler::new(process,
-                                                                expr_compiler,
-                                                                oper_compiler,
-                                      ).compile_func(&loc, &func)
-                                  )));
+            self.process.definitions.add_func(loc,
+                                              Rc::new(Lazy::new(
+                                                  move || FuncCompiler::new(process,
+                                                                            expr_compiler,
+                                                                            oper_compiler,
+                                                  ).compile_func(loc, &func)
+                                              )));
         }
         for (module, def, layout, global) in global_inits {
             let value = if let Some(init) = &global.initializer {
@@ -131,13 +131,13 @@ impl Compiler {
             };
             match def {
                 SymbolDef::Global(addr) =>
-                    self.process.store_impl(
+                    self.process.memory.store_impl(
                         ThreadId(0),
-                        &self.process.value_from_address(addr),
+                        addr,
                         &value,
                         Ordering::None),
                 SymbolDef::ThreadLocal(key) => {
-                    self.process.add_thread_local_init(key, layout, value);
+                    self.process.definitions.add_thread_local_init(key, layout, value);
                 }
             }
         }

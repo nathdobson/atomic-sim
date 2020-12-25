@@ -51,9 +51,9 @@ pub struct Thread(Rc<ThreadInner>);
 pub struct ThreadId(pub usize);
 
 impl Thread {
-    pub fn new(process: Process, threadid: ThreadId, main: &Value, params: &[Value]) -> (Self, impl Future<Output=()>) {
+    pub fn new(process: Process, threadid: ThreadId, main: u64, params: &[Value]) -> (Self, impl Future<Output=()>) {
         let data = DataFlow::new(process.clone(), threadid);
-        let main = process.reverse_lookup_fun(&main).unwrap();
+        let main = process.definitions.reverse_lookup_fun(main).unwrap();
         let params = params.to_vec();
         let control = {
             let data = data.clone();
@@ -95,14 +95,20 @@ impl Thread {
     }
     pub fn thread_local(&self, key: ThreadLocalKey) -> u64 {
         *self.0.thread_locals.borrow_mut().entry(key).or_insert_with(|| {
-            let (layout, value) = self.0.process.thread_local_init(key);
-            let ptr = self.0.process.alloc(self.0.threadid, layout);
-            self.0.process.store_impl(self.0.threadid, &ptr, &value, Ordering::None);
-            ptr.as_u64()
+            let (layout, value) = self.0.process.definitions.thread_local_init(key);
+            let ptr = self.0.process.memory.alloc(self.0.threadid, layout);
+            self.0.process.memory.store_impl(self.0.threadid, ptr, &value, Ordering::None);
+            ptr
         })
     }
     pub fn threadid(&self) -> ThreadId {
         self.0.threadid
+    }
+}
+
+impl ThreadId {
+    pub fn main() -> ThreadId {
+        ThreadId(0)
     }
 }
 

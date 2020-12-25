@@ -11,10 +11,10 @@ async fn _Unwind_RaiseException(flow: &FlowCtx, (object, ): (Addr, )) -> Result<
     Err(Panic)
 }
 
-async fn _Unwind_Backtrace(flow: &FlowCtx, (trace, trace_argument): (Value, Value)) -> Result<Thunk, Panic> {
+async fn _Unwind_Backtrace(flow: &FlowCtx, (Addr(trace), trace_argument): (Addr, Value)) -> Result<Thunk, Panic> {
     for bt in flow.backtrace().iter() {
-        let bctx = flow.process().value_from_address(bt.ip() + 1);
-        let ret = flow.invoke(&trace, &[&bctx, &trace_argument]).await?;
+        let bctx = flow.process().addr(bt.ip() + 1);
+        let ret = flow.invoke(trace, &[&bctx, &trace_argument]).await?;
     }
     Ok(flow.constant(Value::from(0u32)).await)
 }
@@ -45,29 +45,29 @@ async fn __rdos_backtrace_create_state(
 
 async fn __rdos_backtrace_syminfo(
     flow: &FlowCtx,
-    (state, addr, cb, error, data): (Value, Value, Value, Value, Value)) -> u32 {
-    let zero = flow.process().null();
-    let one = flow.process().value_from_address(1);
-    let name = flow.string(&format!("{:?}", flow.process().reverse_lookup(&addr))).await;
-    flow.invoke(&cb, &[&data, &addr, &name, &addr, &one]).await.unwrap();
+    (state, addr, Addr(cb), error, data): (Value, Value, Addr, Value, Value)) -> u32 {
+    let zero = flow.process().addr(0);
+    let one = flow.process().addr(1);
+    let name = flow.process().addr(flow.string(&format!("{:?}", flow.process().symbols.reverse_lookup(addr.as_u64()))).await);
+    flow.invoke(cb, &[&data, &addr, &name, &addr, &one]).await.unwrap();
     0
 }
 
 async fn __rdos_backtrace_pcinfo(
     flow: &FlowCtx,
-    (state, pc, cb, error, data): (Value, Value, Value, Value, Value)) -> u32 {
-    let null = flow.process().null();
-    let symbol = flow.process().reverse_lookup(&pc);
-    let fun = flow.process().reverse_lookup_fun(&pc).unwrap();
-    let symbol_name = flow.string(&format!("{:?}", symbol)).await;
+    (state, pc, Addr(cb), error, data): (Value, Value, Addr, Value, Value)) -> u32 {
+    let null = flow.process().addr(0);
+    let symbol = flow.process().symbols.reverse_lookup(pc.as_u64());
+    let fun = flow.process().definitions.reverse_lookup_fun(pc.as_u64()).unwrap();
+    let symbol_name = flow.process().addr(flow.string(&format!("{:?}", symbol)).await);
     let debugloc = fun.debugloc();
     let (filename, line) = if let Some(debugloc) = debugloc {
         (debugloc.filename.as_str(), debugloc.line)
     } else {
         ("", 0)
     };
-    let filename = flow.string(filename).await;
-    flow.invoke(&cb, &[&data, &pc, &filename, &Value::from(line), &symbol_name]).await.unwrap();
+    let filename = flow.process().addr(flow.string(filename).await);
+    flow.invoke(cb, &[&data, &pc, &filename, &Value::from(line), &symbol_name]).await.unwrap();
     0
 }
 

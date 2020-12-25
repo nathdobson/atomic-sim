@@ -34,20 +34,11 @@ use std::time::Instant;
 use crate::util::timer::dump_trace;
 use crate::compile::module::Compiler;
 
-//mod process;
 mod layout;
 mod value;
-// mod memory;
-// mod ctx;
-// mod function;
-// mod data;
 mod symbols;
 mod native;
-// mod interp;
 mod backtrace;
-// mod flow;
-// mod compute;
-// mod arith;
 mod memory;
 mod process;
 mod data;
@@ -60,6 +51,7 @@ mod compile;
 mod util;
 mod scheduler;
 mod ordering;
+mod definition;
 
 pub fn main() {
     // use crate::thread::Thread;

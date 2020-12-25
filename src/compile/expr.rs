@@ -71,7 +71,7 @@ impl ExprCompiler {
         }
     }
     pub fn type_map(&self) -> TypeMap {
-        self.process.types()
+        self.process.types.clone()
     }
     pub fn compile_oper(&self, oper: COperationName, input: &[&Class]) -> COperation {
         todo!()
@@ -103,12 +103,12 @@ impl ExprCompiler {
                     Name::Name(name) => name,
                     Name::Number(_) => panic!(),
                 };
-                let def = self.process.lookup(Some(self.moduleid), name);
+                let def = self.process.symbols.lookup(Some(self.moduleid), name);
                 match def {
                     SymbolDef::Global(g) =>
                         CExpr::Const {
                             class: self.type_map().ptr(self.type_map().get(ty)),
-                            value: self.process.value_from_address(g),
+                            value: self.process.addr(g),
                         },
                     SymbolDef::ThreadLocal(key) =>
                         CExpr::ThreadLocal {

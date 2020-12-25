@@ -108,7 +108,7 @@ impl OperCompiler {
         OperCompiler { process }
     }
     pub fn type_map(&self) -> TypeMap {
-        self.process.types()
+        self.process.types.clone()
     }
     pub fn compile_operation(&self, name: COperationName, operands: &[&Class]) -> COperation {
         use COperationName::*;

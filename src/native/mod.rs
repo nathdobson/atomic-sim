@@ -240,7 +240,7 @@ impl NativeOutput for Thunk {
 
 impl NativeOutput for Addr {
     fn to_thunk(self, flow: &FlowCtx) -> Result<Result<Thunk, Value>, Panic> {
-        Ok(Err(flow.process().value_from_address(self.0)))
+        Ok(Err(flow.process().addr(self.0)))
     }
 }
 
@@ -256,7 +256,7 @@ trait NativeValueOutput {
 
 impl NativeValueOutput for Addr {
     fn to_value(self, process: &Process) -> Value {
-        process.value_from_address(self.0)
+        process.addr(self.0)
     }
 }
 

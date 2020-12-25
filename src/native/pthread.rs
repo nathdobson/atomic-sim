@@ -12,7 +12,7 @@ use crate::ordering::Ordering;
 const UNLOCKED: u64 = 0x32AAABA7;
 const LOCKED: u64 = 1;
 
-async fn mutex_lock_acquire(flow: &FlowCtx, address: &Value) {
+async fn mutex_lock_acquire(flow: &FlowCtx, address: u64) {
     assert_eq!((UNLOCKED, true), flow.cmpxchg_u64(
         address,
         UNLOCKED,
@@ -21,7 +21,7 @@ async fn mutex_lock_acquire(flow: &FlowCtx, address: &Value) {
         Ordering::Relaxed).await);
 }
 
-async fn mutex_lock_release(flow: &FlowCtx, address: &Value) {
+async fn mutex_lock_release(flow: &FlowCtx, address: u64) {
     assert_eq!((LOCKED, true), flow.cmpxchg_u64(
         address,
         LOCKED,
@@ -30,41 +30,41 @@ async fn mutex_lock_release(flow: &FlowCtx, address: &Value) {
         Ordering::Relaxed).await);
 }
 
-async fn pthread_mutex_trylock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
-    if flow.process().scheduler().mutex(m.as_u64()).try_lock() {
-        mutex_lock_acquire(flow, &m).await;
+async fn pthread_mutex_trylock(flow: &FlowCtx, (Addr(m), ): (Addr, )) -> u32 {
+    if flow.process().scheduler().mutex(m).try_lock() {
+        mutex_lock_acquire(flow, m).await;
         0
     } else {
         1
     }
 }
 
-async fn pthread_mutex_lock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
+async fn pthread_mutex_lock(flow: &FlowCtx, (Addr(m), ): (Addr, )) -> u32 {
     flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Mutex);
-    flow.process().scheduler().mutex(m.as_u64()).lock().await;
+    flow.process().scheduler().mutex(m).lock().await;
     flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Unknown);
-    mutex_lock_acquire(flow, &m).await;
+    mutex_lock_acquire(flow, m).await;
     0
 }
 
-async fn pthread_mutex_unlock(flow: &FlowCtx, (m, ): (Value, )) -> u32 {
-    mutex_lock_release(flow, &m).await;
-    flow.process().scheduler().mutex(m.as_u64()).unlock();
+async fn pthread_mutex_unlock(flow: &FlowCtx, (Addr(m), ): (Addr, )) -> u32 {
+    mutex_lock_release(flow, m).await;
+    flow.process().scheduler().mutex(m).unlock();
     0
 }
 
-async fn pthread_mutex_init(flow: &FlowCtx, (m, attr): (Value, Addr)) -> u32 {
-    flow.store(&m, &Value::from(UNLOCKED)).await;
+async fn pthread_mutex_init(flow: &FlowCtx, (Addr(m), attr): (Addr, Addr)) -> u32 {
+    flow.store(m, &Value::from(UNLOCKED)).await;
     0
 }
 
-async fn pthread_cond_wait(flow: &FlowCtx, (cond, mutex): (Value, Value)) -> u32 {
-    mutex_lock_release(flow, &mutex).await;
+async fn pthread_cond_wait(flow: &FlowCtx, (Addr(cond), Addr(mutex)): (Addr, Addr)) -> u32 {
+    mutex_lock_release(flow, mutex).await;
     flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Cond);
     let scheduler = flow.process().scheduler();
-    scheduler.condvar(cond.as_u64()).wait(scheduler.mutex(mutex.as_u64())).await;
+    scheduler.condvar(cond).wait(scheduler.mutex(mutex)).await;
     flow.process().scheduler().thread(flow.threadid()).unwrap().set_blocker(Blocker::Unknown);
-    mutex_lock_acquire(flow, &mutex).await;
+    mutex_lock_acquire(flow, mutex).await;
     0
 }
 
@@ -133,10 +133,10 @@ async fn pthread_get_stacksize_np(flow: &FlowCtx, (m, ): (Addr, )) -> Addr {
     Addr(0)
 }
 
-async fn pthread_attr_init(flow: &FlowCtx, (attr, ): (Value, )) -> u32 {
+async fn pthread_attr_init(flow: &FlowCtx, (Addr(attr), ): (Addr, )) -> u32 {
     //println!("pthread_attr_init");
     let value = [0xFFu8; 64];
-    flow.store(&attr, &Value::from_bytes_exact(&value)).await;
+    flow.store(attr, &Value::from_bytes_exact(&value)).await;
     0
 }
 
@@ -145,10 +145,12 @@ async fn pthread_attr_setstacksize(flow: &FlowCtx, (attr, stacksize): (Addr, Add
     0
 }
 
-async fn pthread_create(flow: &FlowCtx, (thread, attr, start_routine, arg): (Value, Value, Value, Value)) -> u32 {
-    let threadid = flow.process().add_thread(&start_routine, &[arg]);
+async fn pthread_create(
+    flow: &FlowCtx,
+    (Addr(thread), attr, Addr(start_routine), arg): (Addr, Value, Addr, Value)) -> u32 {
+    let threadid = flow.process().add_thread(start_routine, &[arg]);
     flow.store(
-        &thread,
+        thread,
         &Value::from(threadid.0)).await;
     0
 }

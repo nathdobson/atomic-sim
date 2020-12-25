@@ -21,16 +21,16 @@ fn sysconf(_: &ComputeCtx, (flag, ): (u32, )) -> u64 {
     }) as u64
 }
 
-async fn write(flow: &FlowCtx, (fd, buf, len): (u32, Value, Addr)) -> Addr {
-    let value = if len.0 > 0 {
-        flow.load(&buf, Layout::from_bytes(len.0, 1)).await
+async fn write(flow: &FlowCtx, (fd, Addr(buf), Addr(len)): (u32, Addr, Addr)) -> Addr {
+    let value = if len > 0 {
+        flow.load(buf, Layout::from_bytes(len, 1)).await
     } else {
         Value::from(())
     };
     let value = value.as_bytes();
     let string = String::from_utf8(value.to_vec()).unwrap();
     print!("{}", string);
-    len
+    Addr(len)
 }
 
 async fn mmap(_: &FlowCtx, (addr, length, prot, flags, fd, offset): (Addr, Addr, u32, u32, u32, Addr)) -> Addr {
@@ -49,27 +49,27 @@ fn sigaltstack(_: &ComputeCtx, (ss, old_ss): (Addr, Addr)) -> u32 {
     0
 }
 
-async fn memchr(flow: &FlowCtx, (ptr, value, num): (Addr, u32, Addr)) -> Value {
-    for i in 0..num.0 {
-        let ptr = flow.process().value_from_address(ptr.0 + i);
-        let v = flow.load(&ptr, Layout::from_bytes(1, 1)).await;
+async fn memchr(flow: &FlowCtx, (Addr(ptr), value, Addr(num)): (Addr, u32, Addr)) -> Addr {
+    for i in 0..num {
+        let ptr = ptr + i;
+        let v = flow.load(ptr, Layout::from_bytes(1, 1)).await;
         if v.unwrap_u8() as u32 == value {
-            return ptr;
+            return Addr(ptr);
         }
     }
-    flow.process().value_from_address(0)
+    Addr(0)
 }
 
-async fn strlen(flow: &FlowCtx, (str, ): (Value, )) -> Value {
-    flow.strlen(&str).await
+async fn strlen(flow: &FlowCtx, (Addr(str), ): (Addr, )) -> Addr {
+    Addr(flow.strlen(str).await)
 }
 
 async fn memcmp(flow: &FlowCtx, (ptr1, ptr2, num): (Addr, Addr, Addr)) -> i32 {
     for i in 0..num.0 {
-        let ptr1 = flow.process().value_from_address(ptr1.0 + i);
-        let ptr2 = flow.process().value_from_address(ptr2.0 + i);
-        let v1 = flow.load(&ptr1, Layout::from_bytes(1, 1)).await;
-        let v2 = flow.load(&ptr2, Layout::from_bytes(1, 1)).await;
+        let ptr1 = ptr1.0 + i;
+        let ptr2 = ptr2.0 + i;
+        let v1 = flow.load(ptr1, Layout::from_bytes(1, 1)).await;
+        let v2 = flow.load(ptr2, Layout::from_bytes(1, 1)).await;
         match v1.unwrap_u8().cmp(&v2.unwrap_u8()) {
             Ordering::Less => return -1,
             Ordering::Equal => {}
@@ -79,32 +79,27 @@ async fn memcmp(flow: &FlowCtx, (ptr1, ptr2, num): (Addr, Addr, Addr)) -> i32 {
     0
 }
 
-async fn getenv(flow: &FlowCtx, (name, ): (Addr, )) -> Value {
-    let mut cstr = vec![];
-    for i in name.0.. {
-        let c = flow.load(&Value::from(i), Layout::of_int(8)).await.unwrap_u8();
-        if c == 0 { break; } else { cstr.push(c) }
-    }
-    let str = String::from_utf8(cstr).unwrap();
-    match str.as_str() {
+async fn getenv(flow: &FlowCtx, (Addr(name), ): (Addr, )) -> Addr {
+    let name = flow.get_string(name).await;
+    match name.as_str() {
         "RUST_BACKTRACE" => {
-            flow.string("full").await
+            Addr(flow.string("full").await)
         }
-        _ => flow.process().value_from_address(0)
+        _ => Addr(0)
     }
 }
 
-async fn getcwd(flow: &FlowCtx, (buf, size): (Value, Value)) -> Value {
-    if buf.as_u64() != 0 {
-        if size.as_u64() != 0 {
-            flow.store(&buf, &Value::from(0u8)).await;
+async fn getcwd(flow: &FlowCtx, (Addr(buf), Addr(size)): (Addr, Addr)) -> Addr {
+    if buf != 0 {
+        if size != 0 {
+            flow.store(buf, &Value::from(0u8)).await;
         }
-        buf
+        Addr(buf)
     } else {
         let layout = Layout::of_int(8);
         let res = flow.alloc(layout).await;
-        flow.store(&res, &Value::from(0u8)).await;
-        res
+        flow.store(res, &Value::from(0u8)).await;
+        Addr(res)
     }
 }
 
@@ -112,19 +107,19 @@ fn dladdr(_: &ComputeCtx, (addr, info): (Addr, Addr)) -> u32 {
     1
 }
 
-async fn open(flow: &FlowCtx, (path, flags): (Value, u32)) -> i32 {
-    println!("Calling open({:?}, {:?})", flow.get_string(&path).await, flags);
+async fn open(flow: &FlowCtx, (Addr(path), flags): (Addr, u32)) -> i32 {
+    println!("Calling open({:?}, {:?})", flow.get_string(path).await, flags);
     -1
 }
 
-async fn dlsym(flow: &FlowCtx, (handle, name): (Addr, Value)) -> Addr {
-    let name = flow.get_string(&name).await;
-    Addr(flow.process().lookup(None, &name).global().unwrap())
+async fn dlsym(flow: &FlowCtx, (Addr(handle), Addr(name)): (Addr, Addr)) -> Addr {
+    let name = flow.get_string(name).await;
+    Addr(flow.process().symbols.lookup(None, &name).global().unwrap())
 }
 
-async fn getentropy(flow: &FlowCtx, (buf, len): (Value, Addr)) -> u32 {
+async fn getentropy(flow: &FlowCtx, (Addr(buf), len): (Addr, Addr)) -> u32 {
     let data = Value::from_bytes_exact(&vec![4/*chosen by fair dice roll.*/; len.0 as usize]);
-    flow.store(&buf, &data).await;
+    flow.store(buf, &data).await;
     0
 }
 

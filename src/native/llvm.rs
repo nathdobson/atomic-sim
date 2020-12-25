@@ -25,7 +25,7 @@ macro_rules! overflow_binop {
     ($op:expr, $wrapping:ident, $checked:ident, $llvm_ty:expr, $rust_ty:ident) => {
         {
             fn imp(comp: &ComputeCtx, (x, y):($rust_ty, $rust_ty))->Value{
-                let types = comp.process.types();
+                let types = comp.process.types.clone();
                 let v1 = Value::from(x.$wrapping(y));
                 let v2 = Value::from(x.$checked(y).is_none());
                 let class = types.struc(vec![types.int(v1.bits()), types.int(v2.bits())], false);
@@ -91,12 +91,12 @@ fn llvm_lifetime_start_p0i8(comp: &ComputeCtx, _: (Value, Value)) {}
 
 fn llvm_lifetime_end_p0i8(comp: &ComputeCtx, _: (Value, Value)) {}
 
-async fn llvm_memcpy_p0i8_p0i8_i64(flow: &FlowCtx, (dst, src, cnt, volatile): (Value, Value, Addr, bool)) {
-    flow.memcpy(&dst, &src, cnt.0).await;
+async fn llvm_memcpy_p0i8_p0i8_i64(flow: &FlowCtx, (Addr(dst), Addr(src), Addr(cnt), volatile): (Addr, Addr, Addr, bool)) {
+    flow.memcpy(dst, src, cnt).await;
 }
 
-async fn llvm_memmove_p0i8_p0i8_i64(flow: &FlowCtx, (dst, src, cnt): (Value, Value, Addr)) {
-    flow.memcpy(&dst, &src, cnt.0).await;
+async fn llvm_memmove_p0i8_p0i8_i64(flow: &FlowCtx, (Addr(dst), Addr(src), Addr(cnt)): (Addr, Addr, Addr)) {
+    flow.memcpy(dst, src, cnt).await;
 }
 
 fn llvm_ctpop_i64(comp: &ComputeCtx, (x, ): (u64, )) -> u64 {
@@ -111,9 +111,9 @@ fn llvm_trap(comp: &ComputeCtx, (): ()) {
     panic!("It's a trap!");
 }
 
-async fn llvm_memset_p0i8_i64(flow: &FlowCtx, (addr, val, len, volatile): (Value, u8, Addr, bool)) {
-    flow.store(&addr,
-               &Value::from_bytes_exact(&vec![val; len.0 as usize]),
+async fn llvm_memset_p0i8_i64(flow: &FlowCtx, (Addr(addr), val, Addr(len), volatile): (Addr, u8, Addr, bool)) {
+    flow.store(addr,
+               &Value::from_bytes_exact(&vec![val; len as usize]),
     ).await;
 }
 
