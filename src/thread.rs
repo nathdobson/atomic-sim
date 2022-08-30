@@ -28,6 +28,9 @@ use crate::symbols::{Symbol, ThreadLocalKey};
 use crate::util::future::{LocalBoxFuture, noop_waker, pending_once};
 use crate::util::recursor::Recursor;
 use crate::value::{add_u64_i64, Value};
+use futures::channel::oneshot::{Receiver, channel};
+use futures::future::Shared;
+use futures::FutureExt;
 
 #[derive(Debug)]
 pub enum Blocker {
@@ -44,6 +47,7 @@ pub struct ThreadInner {
     blocker: RefCell<Blocker>,
     data: DataFlow,
     thread_locals: RefCell<HashMap<ThreadLocalKey, u64>>,
+    join_handle: Shared<Receiver<u64>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +61,8 @@ impl Thread {
         let data = DataFlow::new(process.clone(), threadid);
         let main = process.definitions.reverse_lookup_fun(main).unwrap();
         let params = params.to_vec();
+        let (join_signal, join_handle) = channel();
+        let join_handle = join_handle.shared();
         let control = {
             let data = data.clone();
             let process = process.clone();
@@ -71,17 +77,20 @@ impl Thread {
                 let main = main.call_imp(&flow, &deps);
                 let main = recursor.spawn(main);
                 recursor.await;
-                main.await.unwrap();
-                println!("Finished decoding thread");
+                let value = main.await.unwrap();
+                join_signal.send(value.await.as_u64()).unwrap();
+                println!("Finished decoding thread {:?}", threadid);
             };
             async_timer!("Thread::new::control", inner)
         };
+
         (Thread(Rc::new(ThreadInner {
             process,
             threadid,
             blocker: RefCell::new(Blocker::Unknown),
             data,
             thread_locals: RefCell::new(HashMap::new()),
+            join_handle,
         })), control)
     }
     pub fn set_blocker(&self, blocker: Blocker) {
@@ -105,6 +114,12 @@ impl Thread {
     }
     pub fn threadid(&self) -> ThreadId {
         self.0.threadid
+    }
+    pub async fn join(&self) -> Value {
+        self.0.process.addr(self.0.join_handle.clone().await.unwrap())
+    }
+    pub fn alive(&self) -> bool {
+        self.0.join_handle.clone().now_or_never().is_none() || self.0.data.len() > 0
     }
 }
 

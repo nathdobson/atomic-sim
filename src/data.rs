@@ -32,6 +32,7 @@ use crate::util::rangemap::RangeMap;
 use crate::value::Value;
 
 const PIPELINE_SIZE: usize = 1000;
+const TRACING: bool = true;
 
 pub struct DataFlowInner {
     process: Process,
@@ -82,7 +83,7 @@ pub struct ThunkInner {
     atomicity: Ordering,
     backtrace: Backtrace,
     value: RefCell<ThunkState>,
-    wakers: RefCell<Option<Waker>>,
+    wakers: RefCell<Vec<Waker>>,
     tracing: bool,
 }
 
@@ -103,7 +104,7 @@ impl Thunk {
             atomicity: Ordering::None,
             backtrace: Backtrace::empty(),
             value: RefCell::new(ThunkState::Ready(value)),
-            wakers: RefCell::new(None),
+            wakers: RefCell::new(vec![]),
             tracing: false,
         }))
     }
@@ -136,7 +137,7 @@ impl Thunk {
             ThunkState::Pending(_) => {}
             _ => unreachable!(),
         }
-        if self.0.tracing {
+        if self.0.tracing || TRACING {
             print!("res {:10} = ", format!("{:?}", self));
         }
         {
@@ -151,10 +152,10 @@ impl Thunk {
                 _ => unreachable!(),
             }
         }
-        if self.0.tracing {
+        if self.0.tracing || TRACING {
             println!("{:?}", self);
         }
-        if let Some(waker) = self.0.wakers.borrow_mut().take() {
+        for waker in self.0.wakers.borrow_mut().drain(..) {
             waker.wake();
         }
         return true;
@@ -177,6 +178,9 @@ impl Thunk {
     pub fn full_debug<'a>(&'a self) -> impl 'a + Debug {
         (self, self.all_deps(), self.backtrace())
     }
+    pub fn tracing(&self) -> bool {
+        self.0.tracing
+    }
 }
 
 
@@ -188,7 +192,7 @@ impl DataFlow {
             seq: 0,
             freelist: FreeList::new(),
             thunks: IndexSet::new(),
-            tracing: true,
+            tracing: false,
         })))
     }
     pub async fn thunk_impl(
@@ -214,11 +218,11 @@ impl DataFlow {
             atomicity,
             backtrace,
             value: RefCell::new(ThunkState::Pending(Box::new(compute))),
-            wakers: RefCell::new(None),
+            wakers: RefCell::new(vec![]),
             tracing: this.tracing,
         }));
         this.thunks.insert(thunk.clone());
-        if this.tracing {
+        if this.tracing || TRACING {
             let id = format!("{:?}", thunk);
             let deps = thunk.0.deps.iter().map(|x| format!("{:?}", x)).join(", ");
             let loc = thunk.0.backtrace.iter().next().map(|x| x.loc()).unwrap_or_default();
@@ -356,10 +360,10 @@ impl<'a> Debug for DebugDeps<'a> {
 
 impl Debug for Thunk {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(value) = self.try_get() {
-            write!(f, "{:?}", value)
-        } else {
-            write!(f, "{:?}#{:?}", self.0.threadid, self.0.seq)
+        match &*self.0.value.borrow() {
+            ThunkState::Pending(_) => write!(f, "{:?}#{:?}", self.0.threadid, self.0.seq),
+            ThunkState::Ready(value) => write!(f, "{:?}", value),
+            ThunkState::Sandbag => write!(f, "Sandbag"),
         }
     }
 }
@@ -383,8 +387,7 @@ impl Future for Thunk {
             Poll::Ready(v.clone())
         } else {
             let mut wakers = self.0.wakers.borrow_mut();
-            assert!(wakers.is_none());
-            *wakers = Some(cx.waker().clone());
+            wakers.push(cx.waker().clone());
             self.0.process.thread(self.0.threadid).unwrap().set_blocker(Blocker::Thunk(self.clone()));
             Poll::Pending
         }

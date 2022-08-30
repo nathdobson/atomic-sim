@@ -16,6 +16,7 @@ use crate::process::Process;
 use crate::thread::{Thread, ThreadId};
 use crate::util::mutex::{Condvar, Mutex};
 use crate::value::Value;
+use futures::FutureExt;
 
 #[derive(Debug, Clone)]
 pub struct Scheduler(Rc<RefCell<SchedulerInner>>);
@@ -23,7 +24,6 @@ pub struct Scheduler(Rc<RefCell<SchedulerInner>>);
 pub struct SchedulerInner {
     threads: BTreeMap<ThreadId, Thread>,
     next_threadid: usize,
-    rng: XorShiftRng,
     mutexes: HashMap<u64, Mutex>,
     condvars: HashMap<u64, Condvar>,
 }
@@ -33,7 +33,6 @@ impl Scheduler {
         Scheduler(Rc::new(RefCell::new(SchedulerInner {
             threads: BTreeMap::new(),
             next_threadid: 0,
-            rng: XorShiftRng::seed_from_u64(0),
             mutexes: HashMap::new(),
             condvars: HashMap::new(),
         })))
@@ -59,6 +58,9 @@ impl Scheduler {
     pub fn threads(&self) -> Vec<Thread> {
         self.0.borrow().threads.values().cloned().collect()
     }
+    pub fn reap_threads(&self) {
+        self.0.borrow_mut().threads.retain(|_, t| { t.alive() });
+    }
     pub fn cancel(&self) {
         let mut this = self.0.borrow_mut();
         this.threads.clear();
@@ -77,7 +79,6 @@ impl Debug for SchedulerInner {
         f.debug_struct("SchedulerInner")
             .field("threads", &self.threads)
             .field("next_threadid", &self.next_threadid)
-            .field("rng", &self.rng)
             .finish()
     }
 }

@@ -105,14 +105,14 @@ async fn pthread_mutex_destroy(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
     0
 }
 
-async fn pthread_cond_broadcast(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    todo!();
-    //0
+async fn pthread_cond_broadcast(flow: &FlowCtx, (Addr(c), ): (Addr, )) -> u32 {
+    flow.process().scheduler.condvar(c).notify_all();
+    0
 }
 
-async fn pthread_cond_signal(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
-    todo!();
-    //0
+async fn pthread_cond_signal(flow: &FlowCtx, (Addr(c), ): (Addr, )) -> u32 {
+    flow.process().scheduler.condvar(c).notify();
+    0
 }
 
 async fn pthread_cond_destroy(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
@@ -161,11 +161,11 @@ async fn pthread_attr_destroy(flow: &FlowCtx, (m, ): (Addr, )) -> u32 {
     0
 }
 
-async fn pthread_join(flow: &FlowCtx, (thread, retval): (u64, Addr)) -> u32 {
-    assert_eq!(retval.0, 0);
+async fn pthread_join(flow: &FlowCtx, (thread, Addr(retval)): (u64, Addr)) -> u32 {
     let thread = ThreadId(thread as usize);
-    while flow.process().thread(thread).is_some() {
-        flow.constant(Value::from(())).await.await;
+    let result = flow.process().thread(thread).unwrap().join().await;
+    if retval != 0 {
+        flow.store(retval, &result).await;
     }
     0
 }

@@ -1,2 +1,2 @@
 [target.x86_64-apple-darwin]
-linker = "true" # Disable linker ;)
+#linker = "./linker.sh" # Disable linker ;)

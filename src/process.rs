@@ -39,6 +39,7 @@ use crate::symbols::ThreadLocalKey;
 use crate::thread::{Thread, ThreadId};
 use crate::timer;
 use crate::value::{add_u64_i64, Value};
+use futures::FutureExt;
 
 pub struct ProcessInner {
     pub definitions: Definitions,
@@ -50,6 +51,7 @@ pub struct ProcessInner {
     pub scheduler: Scheduler,
     pub pool: RefCell<LocalPool>,
     pub spawner: LocalSpawner,
+    pub rng: RefCell<XorShiftRng>,
 }
 
 #[derive(Clone)]
@@ -80,6 +82,7 @@ impl Process {
             scheduler: Scheduler::new(),
             pool: RefCell::new(pool),
             spawner,
+            rng: RefCell::new(XorShiftRng::seed_from_u64(1)),
         }));
         (result.clone(), ProcessScope(result))
     }
@@ -94,24 +97,30 @@ impl Process {
         let mut resolvable: Vec<Thunk> = vec![];
         loop {
             resolvable.clear();
-            println!("Decoding... \n{:#?}", self.0.scheduler);
+            //println!("Decoding... \n{:#?}", self.0.scheduler);
             self.pool.borrow_mut().run_until_stalled();
             let threads = self.0.scheduler.threads();
             let mut progress = false;
-            println!("Stepping... \n{:#?}", self.0.scheduler);
+            //println!("Stepping... \n{:#?}", self.0.scheduler);
             for thread in threads {
                 progress |= thread.step_pure(&mut resolvable);
             }
+            self.0.scheduler.reap_threads();
             if !progress { break; }
         }
-        println!("resolvable = {:?}", resolvable);
         if resolvable.len() == 0 {
-            panic!("no progress to be made");
+            assert_eq!(self.0.scheduler.threads().len(), 0);
+            false
         } else if resolvable.len() == 1 {
             assert!(resolvable[0].step());
             true
         } else {
-            panic!("No more available progress. {:#?}", self.0.scheduler);
+            if resolvable.iter().any(|x| x.tracing()) {
+                println!("resolvable = {:#?}", resolvable.iter().map(|x| x.full_debug()).collect::<Vec<_>>());
+                println!("Atomic race. {:#?}", self.0.scheduler);
+            }
+            assert!(resolvable.iter().choose(&mut *self.rng.borrow_mut()).unwrap().step());
+            true
         }
     }
     pub fn addr(&self, x: u64) -> Value {

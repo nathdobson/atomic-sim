@@ -73,7 +73,7 @@ extern "C" {
 fn main() {
     unsafe {
         let x = Arc::new(Mutex::new(0));
-        for _ in 0..10 {
+        for _ in 0..1 {
             println!("TEST");
             let a = DangerCell::new(1usize);
             let b = AtomicUsize::new(10usize);

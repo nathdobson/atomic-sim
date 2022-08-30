@@ -1,10 +1,11 @@
 #!/bin/sh
 set -e
 cd tests
+clang -c c/native.c -o c/libnative.a
 function build {
   #OPT_LEVEL=-C opt-level=0
   OPT_LEVEL=
-  RUSTFLAGS="--emit $1" \
+  RUSTFLAGS="--emit $1 -l native -L ./c" \
   cargo +nightly-2020-07-01-x86_64-apple-darwin \
        rustc --release \
              -Zbuild-std=std,core,alloc \
